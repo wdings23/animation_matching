@@ -1,0 +1,17 @@
+{
+    "Jobs": 
+    [
+        {
+            "Name": "Simple Offscreen Graphics",
+            "Pipeline": "simple.json",
+            "Type": "Graphics",
+            "PassType": "Mesh Graphics"
+        },
+        {
+            "Name": "Swap Chain Graphics",
+            "Pipeline": "swap_chain.json",
+            "Type": "Graphics",
+            "PassType": "Mesh Graphicss"
+        }
+    ]
+}

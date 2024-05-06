@@ -1,0 +1,34 @@
+{
+    "Name": "Swap Chain Graphics",
+    "Type": "Graphics",
+    "PassType": "Swap Chain Full Triangle",
+    "Shader": "swap-chain.shader",
+    "Attachments": [
+        {
+            "Name" : "Output",
+            "Type": "TextureInput",
+            "ShaderResourceName": "position_texture",
+            "ParentJobName": "Simple Offscreen Graphics"
+        }
+    ],
+    "ShaderResources": [
+    ],
+    "BlendStates": [
+        {
+            "Enabled": "True"
+        }
+    ],
+    "DepthStencilState":
+    {
+        "DepthEnable": "False",
+        "DepthWriteMask": "One",
+        "DepthFunc": "LessEqual",
+        "StencilEnable": "False"
+    },
+    "RasterState":
+    {
+        "FillMode": "Solid",
+        "CullMode": "None",
+        "FrontFace": "CounterClockwise"
+    }
+}
