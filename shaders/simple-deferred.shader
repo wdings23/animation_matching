@@ -1,182 +1,126 @@
-struct Locals {
-    transform: mat4x4<f32>,
+struct DefaultUniformData
+{
+    miScreenWidth: i32,
+    miScreenHeight: i32,
+    miFrame: i32,
+    miNumMeshes: u32,
+
+    mfRand0: f32,
+    mfRand1: f32,
+    mfRand2: f32,
+    mfRand3: f32,
+
+    mViewProjectionMatrix: mat4x4<f32>,
+    mPrevViewProjectionMatrix: mat4x4<f32>,
+    mViewMatrix: mat4x4<f32>,
+    mProjectionMatrix: mat4x4<f32>,
+
+    mJitteredViewProjectionMatrix: mat4x4<f32>,
+    mPrevJitteredViewProjectionMatrix: mat4x4<f32>,
+
+    mCameraPosition: vec4<f32>,
+    mCameraLookDir: vec4<f32>,
+
+    mLightRadiance: vec4<f32>,
+    mLightDirection: vec4<f32>,
+
+    mfAmbientOcclusionDistanceThreshold: f32,
 };
+
+
 @group(0) @binding(0)
-var<uniform> r_locals: Locals;
+var<storage, read> aPreviousVertexPositions: array<vec4<f32>>;
 
-@group(0) @binding(1)
-var<uniform> skinning_matrices0: array<mat4x4<f32>, 16>;
+struct UniformData {
+    mViewProjectionMatrix: mat4x4<f32>,
+    mPrevViewProjectionMatrix: mat4x4<f32>,
+    mViewMatrix: mat4x4<f32>,
 
-@group(0) @binding(2)
-var<uniform> skinning_matrices1: array<mat4x4<f32>, 16>;
+    mJitteredViewProjectionMatrix: mat4x4<f32>,
+    mPrevJitteredViewProjectionMatrix: mat4x4<f32>,
+};
+@group(1) @binding(0)
+var<uniform> uniformData: UniformData;
 
-@group(0) @binding(3)
-var<uniform> skinning_matrices2: array<mat4x4<f32>, 16>;
-
-@group(0) @binding(4)
-var<uniform> skinning_matrices3: array<mat4x4<f32>, 16>;
-
-@group(0) @binding(5)
-var<uniform> skinning_matrices4: array<mat4x4<f32>, 16>;
+@group(1) @binding(1)
+var<uniform> defaultUniformData: DefaultUniformData;
 
 struct VertexInput {
     @location(0) pos : vec4<f32>,
-    @location(1) texcoord: vec2<f32>,
-    @location(2) color : vec4<f32>,
-    @location(3) joint_weights : vec4<f32>,
-    @location(4) joint_indices : vec4<f32>
+    @location(1) texCoord: vec4<f32>,
+    @location(2) normal : vec4<f32>,
 };
 struct VertexOutput {
-    @location(0) texcoord: vec2<f32>,
+    @location(0) texCoord: vec2<f32>,
     @builtin(position) pos: vec4<f32>,
-    @location(1) color: vec4<f32>
+    @location(1) normal: vec4<f32>,
+
+    @location(2) worldPosition: vec4<f32>,
+    @location(3) previousWorldPosition: vec4<f32>,
 };
 struct FragmentOutput {
-    @location(0) color_output : vec4f,
+    @location(0) worldPosition : vec4f,
+    @location(1) texCoord: vec4f,
+    @location(2) normal: vec4f,
+    @location(3) motionVector: vec4f,
+    @location(4) clipSpace: vec4<f32>,
+    @location(5) skinOnlyClipSpace: vec4<f32>,
 };
 
 
 @vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-
-    let joint_index0: u32 = u32(floor(in.joint_indices.x + 0.5));
-    let joint_index1: u32 = u32(floor(in.joint_indices.y + 0.5));
-    let joint_index2: u32 = u32(floor(in.joint_indices.z + 0.5));
-    let joint_index3: u32 = u32(floor(in.joint_indices.w + 0.5)); 
-
-    let weight0: f32 = in.joint_weights.x;
-    let weight1: f32 = in.joint_weights.y;
-    let weight2: f32 = in.joint_weights.z;
-    let weight3: f32 = in.joint_weights.w;
-
-    let matrix_index0: u32 = joint_index0 / 16;
-    let matrix_index1: u32 = joint_index1 / 16;
-    let matrix_index2: u32 = joint_index2 / 16;
-    let matrix_index3: u32 = joint_index3 / 16;
-
-    let index0: u32 = joint_index0 % 16;
-    let index1: u32 = joint_index1 % 16;
-    let index2: u32 = joint_index2 % 16;
-    let index3: u32 = joint_index3 % 16;
-
-    var anim_matrix0: mat4x4<f32> = mat4x4<f32>();
-    if(matrix_index0 == 0)
-    {
-        anim_matrix0 = skinning_matrices0[index0];
-    }
-    else if(matrix_index0 == 1)
-    {
-        anim_matrix0 = skinning_matrices1[index0];
-    }
-    else if(matrix_index0 == 2)
-    {
-        anim_matrix0 = skinning_matrices2[index0];
-    }
-    else if(matrix_index0 == 3)
-    {
-        anim_matrix0 = skinning_matrices3[index0];
-    }
-    else if(matrix_index0 == 4)
-    {
-        anim_matrix0 = skinning_matrices4[index0];
-    }
-
-    var anim_matrix1: mat4x4<f32> = mat4x4<f32>();
-    if(matrix_index1 == 0)
-    {
-        anim_matrix1 = skinning_matrices0[index1];
-    }
-    else if(matrix_index1 == 1)
-    {
-        anim_matrix1 = skinning_matrices1[index1];
-    }
-    else if(matrix_index1 == 2)
-    {
-        anim_matrix1 = skinning_matrices2[index1];
-    }
-    else if(matrix_index1 == 3)
-    {
-        anim_matrix1 = skinning_matrices3[index1];
-    }
-    else if(matrix_index1 == 4)
-    {
-        anim_matrix1 = skinning_matrices4[index1];
-    }
-
-    var anim_matrix2: mat4x4<f32> = mat4x4<f32>();
-    if(matrix_index2 == 0)
-    {
-        anim_matrix2 = skinning_matrices0[index2];
-    }
-    else if(matrix_index2 == 1)
-    {
-        anim_matrix2 = skinning_matrices1[index2];
-    }
-    else if(matrix_index2 == 2)
-    {
-        anim_matrix2 = skinning_matrices2[index2];
-    }
-    else if(matrix_index2 == 3)
-    {
-        anim_matrix2 = skinning_matrices3[index2];
-    }
-    else if(matrix_index2 == 4)
-    {
-        anim_matrix2 = skinning_matrices4[index2];
-    }
-
-    var anim_matrix3: mat4x4<f32> = mat4x4<f32>();
-    if(matrix_index3 == 0)
-    {
-        anim_matrix3 = skinning_matrices0[index3];
-    }
-    else if(matrix_index3 == 1)
-    {
-        anim_matrix3 = skinning_matrices1[index3];
-    }
-    else if(matrix_index3 == 2)
-    {
-        anim_matrix3 = skinning_matrices2[index3];
-    }
-    else if(matrix_index3 == 3)
-    {
-        anim_matrix3 = skinning_matrices3[index3];
-    }
-    else if(matrix_index3 == 4)
-    {
-        anim_matrix3 = skinning_matrices4[index3];
-    }
-
-    let vert0: vec4<f32> = (vec4<f32>(in.pos.xyz, 1.0) * anim_matrix0) * weight0;
-    let vert1: vec4<f32> = (vec4<f32>(in.pos.xyz, 1.0) * anim_matrix1) * weight1;
-    let vert2: vec4<f32> = (vec4<f32>(in.pos.xyz, 1.0) * anim_matrix2) * weight2;
-    let vert3: vec4<f32> = (vec4<f32>(in.pos.xyz, 1.0) * anim_matrix3) * weight3;
-
-    //let vert0: vec4<f32> = (anim_matrix0 * vec4<f32>(in.pos.xyz, 1.0)) * weight0;
-    //let vert1: vec4<f32> = (anim_matrix1 * vec4<f32>(in.pos.xyz, 1.0)) * weight1;
-    //let vert2: vec4<f32> = (anim_matrix2 * vec4<f32>(in.pos.xyz, 1.0)) * weight2;
-    //let vert3: vec4<f32> = (anim_matrix3 * vec4<f32>(in.pos.xyz, 1.0)) * weight3;
-
-    let total_xform: vec4<f32> = vec4<f32>(vert0.xyz + vert1.xyz + vert2.xyz + vert3.xyz, 1.0);
-
+fn vs_main(in: VertexInput, @builtin(vertex_index) iVertexIndex: u32) -> VertexOutput 
+{
     var out: VertexOutput;
-    out.pos = total_xform * r_locals.transform;
-    out.texcoord = in.texcoord;
-    out.color = in.color;
+    out.pos = vec4<f32>(in.pos.xyz, 1.0f) * defaultUniformData.mJitteredViewProjectionMatrix;
+    out.texCoord = in.texCoord.xy;
+    out.normal = in.normal;
+
+    out.worldPosition = in.pos;
+    out.previousWorldPosition = aPreviousVertexPositions[iVertexIndex];
+
     return out;
 }
 
 @fragment
-fn fs_main(in: VertexOutput) -> FragmentOutput {
+fn fs_main(in: VertexOutput) -> FragmentOutput 
+{
     var out: FragmentOutput;
-    var dp: f32 = dot(in.color.xyz, normalize(vec3<f32>(-1.0, 1.0, -1.0)));
-    if(dp < 0.0)
-    {
-        dp = 0.0;
-    }
+    
+    out.worldPosition = in.worldPosition;
+    out.texCoord = vec4<f32>(in.texCoord.xy, 0.0f, 0.0f);
+    out.normal = in.normal;
 
-    var ambientShade: f32 = 0.2;
-    out.color_output = vec4<f32>(dp + ambientShade, dp + ambientShade, dp + ambientShade, 1.0);
+    var prevClipSpacePosition: vec4<f32> = in.previousWorldPosition * defaultUniformData.mPrevViewProjectionMatrix;
+    var clipSpacePosition: vec4<f32> = in.worldPosition * defaultUniformData.mViewProjectionMatrix;
+
+    prevClipSpacePosition.x /= prevClipSpacePosition.w;
+    prevClipSpacePosition.y /= prevClipSpacePosition.w;
+    prevClipSpacePosition.z /= prevClipSpacePosition.w;
+
+    clipSpacePosition.x /= clipSpacePosition.w;
+    clipSpacePosition.y /= clipSpacePosition.w;
+    clipSpacePosition.z /= clipSpacePosition.w;
+
+    prevClipSpacePosition.x = prevClipSpacePosition.x * 0.5f + 0.5f;
+    prevClipSpacePosition.y = prevClipSpacePosition.y * 0.5f + 0.5f;
+    prevClipSpacePosition.z = prevClipSpacePosition.z * 0.5f + 0.5f;
+
+    var clipSpace: vec3<f32> = clipSpacePosition.xyz;
+
+    clipSpacePosition.x = clipSpacePosition.x * 0.5f + 0.5f;
+    clipSpacePosition.y = clipSpacePosition.y * 0.5f + 0.5f;
+    clipSpacePosition.z = clipSpacePosition.z * 0.5f + 0.5f;
+
+    out.motionVector.x = (clipSpacePosition.x - prevClipSpacePosition.x) * 0.5f + 0.5f;
+    out.motionVector.y = 1.0f - ((clipSpacePosition.y - prevClipSpacePosition.y) * 0.5f + 0.5f);
+    out.motionVector.z = floor(in.worldPosition.w + 0.5f);      // mesh id
+    out.motionVector.w = clipSpacePosition.z;                    // depth
+
+    out.worldPosition.w = in.pos.z;
+
+    out.clipSpace = vec4<f32>(clipSpace.xyz, 1.0f);
+    out.skinOnlyClipSpace = vec4<f32>(clipSpace.xyz, 1.0f);
 
     return out;
 }
