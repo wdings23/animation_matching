@@ -1,5 +1,6 @@
 import os 
 import sys
+import json
 
 from gltf_loader import *
 from rig_anim_utils import *
@@ -90,7 +91,7 @@ def traverse_matching_anim(joint, output_file_path = ''):
         traverse_matching_anim(child_joint, output_file_path)
 
 ##
-def translate_joint_rotation(
+def match_joint_transforms(
     dest_joint,
     rig_src,
     rig_dest,
@@ -195,7 +196,7 @@ def translate_joint_rotation(
 
 
     for child_joint in dest_joint.children:
-        translate_joint_rotation(
+        match_joint_transforms(
             dest_joint = child_joint,
             rig_src = rig_src,
             rig_dest = rig_dest,
@@ -225,7 +226,7 @@ def print_joint_position(joint):
         print_joint_position(child_joint)
 
 ##
-def get_all_anim_rotations(
+def get_all_anim_transformations(
     joint,
     matching_anim_rotations,
     matching_anim_translations):
@@ -233,21 +234,173 @@ def get_all_anim_rotations(
     matching_anim_rotations[joint.name] = joint.local_rotation * joint.matching_anim_rotation
     matching_anim_translations[joint.name] = joint.local_translation
     for child_joint in joint.children:
-        get_all_anim_rotations(
+        get_all_anim_transformations(
             joint = child_joint, 
             matching_anim_rotations = matching_anim_rotations,
             matching_anim_translations = matching_anim_translations)
 
 ##
+def get_rig_extent(rig):
+    largest_position = float3(-9999.0, -9999.0, -9999.0)
+    smallest_position = float3(9999.0, 9999.0, 9999.0)
+
+    for root_joint in rig.root_joints:
+        traverse_rig_bind(root_joint)
+
+    for joint_index in range(len(rig.joints)):
+        position = float3(
+            rig.joints[joint_index].total_matrix.entries[3],
+            rig.joints[joint_index].total_matrix.entries[7],
+            rig.joints[joint_index].total_matrix.entries[11])
+        
+        if position.x > largest_position.x:
+            largest_position.x = position.x
+        if position.y > largest_position.y:
+            largest_position.y = position.y
+        if position.z > largest_position.z:
+            largest_position.z = position.z
+
+        if position.x < smallest_position.x:
+            smallest_position.x = position.x
+        if position.y < smallest_position.y:
+            smallest_position.y = position.y
+        if position.z < smallest_position.z:
+            smallest_position.z = position.z
+
+    root_position = float3(
+        rig.root_joints[0].total_matrix.entries[3],
+        rig.root_joints[0].total_matrix.entries[7],
+        rig.root_joints[0].total_matrix.entries[11]
+    )
+
+    return smallest_position, largest_position, root_position
+
+##
+def save_matching_keyframes(
+    keyframe_channels,
+    src_keyframe_file_path,
+    dest_keyframe_file_path,
+    keyframe_output_directory):
+
+    keys = list(keyframe_channels.keys())
+    num_keys = len(keys)
+
+    json_dict = {}
+    for key_index in range(num_keys):
+        key = keys[key_index]
+
+        keyframe_info_array = []
+        for type_index in range(3):
+
+            type_str = 'translation'
+            if type_index == 1:
+                type_str = 'rotation'
+            elif type_index == 2:
+                type_str = 'scale'
+
+            data = keyframe_channels[key][type_index].data
+            times = keyframe_channels[key][type_index].times
+
+            keyframe_info_array.append([])
+
+            num_frames = len(times)
+            for frame_index in range(num_frames):
+                keyframe_data_dict = {
+                    'type': type_str,
+                    'x': data[frame_index].x,
+                    'y': data[frame_index].y,
+                    'z': data[frame_index].z,
+                    'time': times[frame_index]
+                }
+
+                if type_index == 1:
+                    keyframe_data_dict['w'] = data[frame_index].w
+                
+                keyframe_info_array[type_index].append(keyframe_data_dict)
+        
+        key = keys[key_index]
+        json_dict[key] = keyframe_info_array
+
+    src_base_name = os.path.basename(src_keyframe_file_path)
+    src_base_name = src_base_name[:src_base_name.rfind('.')]
+    dest_base_name = os.path.basename(dest_keyframe_file_path)
+    dest_base_name = dest_base_name[:dest_base_name.rfind('.')]
+    file_name = src_base_name + '-to-' + dest_base_name
+
+    json_file_content = json.dumps(json_dict, indent = 4)
+    output_file_path = os.path.join(keyframe_output_directory, file_name + '-matching-animation.json')
+    json_file = open(output_file_path, 'wb')
+    json_file.write(json_file_content.encode('utf-8'))
+    json_file.close()
+
+##
+def load_matching_keyframes(file_path):
+    file = open(file_path, 'r')
+    file_content = file.read()
+    file.close()
+    keyframe_dict = json.loads(file_content)
+
+    keys = list(keyframe_dict.keys())
+
+    key_frame_channels = {}
+    for joint_index in range(len(keys)):
+        key = keys[joint_index]
+        
+        key_frame_channels[key] = []
+        for type_index in range(3):
+            type_str = 'translation'
+            if type_index == 1:
+                type_str = 'rotation'
+            elif type_index == 2:
+                type_str = 'scale'
+            
+            info = keyframe_dict[key][type_index]
+
+            data_array = []
+            time_array = []
+            for entry in info:
+                
+                if type_index == 1:
+                    channel_data = quaternion(
+                        entry['x'],
+                        entry['y'],
+                        entry['z'],
+                        entry['w']
+                    )
+                    data_array.append(channel_data)
+                else:
+                    channel_data = float3(
+                        entry['x'],
+                        entry['y'],
+                        entry['z']
+                    )
+                    data_array.append(channel_data)
+
+                time = entry['time']
+                time_array.append(time)
+
+            key_frame_channels[key].append(KeyFrameChannel(
+                times = time_array,
+                data = data_array,
+                joint_index = joint_index,
+                type = type_str))
+
+    return key_frame_channels
+
+##
 def translate_keyframe_channels2(
     src_file_path,
-    dest_file_path):
+    dest_file_path,
+    save_directory = ''):
 
     joint_mappings = {
         'mixamorig:Spine' : 'Spine',
         'mixamorig:Head' : 'Head',
+        'mixamorig:Spine2' : 'Spine1',
+        'mixamorig:LeftForeArm' : 'LeftShoulder',
         'mixamorig:LeftForeArm' : 'LeftForeArm',
         'mixamorig:LeftHand': 'LeftHand',
+        'mixamorig:RightForeArm' : 'RightShoulder',
         'mixamorig:RightForeArm' : 'RightForeArm',
         'mixamorig:RightHand' : 'RightHand',
         'mixamorig:LeftLeg' : 'LeftLeg',
@@ -269,6 +422,21 @@ def translate_keyframe_channels2(
     total_matching_anim_rotations = {}
     total_matching_anim_translations = {}
     total_times = []
+
+    # get rig scaling factor
+    smallest_position_src, largest_position_src, root_bind_position_src = get_rig_extent(rig_src)
+    smallest_position_dest, largest_position_dest, root_bind_position_dest = get_rig_extent(rig_dest) 
+
+    rig_src_to_dest_scale = float3(
+        (largest_position_src.x - smallest_position_src.x) / (largest_position_src.x - smallest_position_dest.x),
+        (largest_position_src.y - smallest_position_src.y) / (largest_position_src.y - smallest_position_dest.y),
+        (largest_position_src.z - smallest_position_src.z) / (largest_position_src.z - smallest_position_dest.z)
+    )
+    rig_translation_scale = rig_src_to_dest_scale.x
+    if rig_src_to_dest_scale.y > rig_translation_scale:
+        rig_translation_scale = rig_src_to_dest_scale.y
+    if rig_src_to_dest_scale.z > rig_translation_scale:
+        rig_translation_scale = rig_src_to_dest_scale.z
 
     # rig translations is the world position of joint in bind pose
     for time in keyframe_times:
@@ -303,20 +471,35 @@ def translate_keyframe_channels2(
 
         # translate matching animation from src rig to dest rig
         for dest_root_joint in rig_dest.root_joints:
-            translate_joint_rotation(
+            match_joint_transforms(
                 dest_joint = dest_root_joint,
                 rig_src = rig_src,
                 rig_dest = rig_dest,
                 joint_mappings = joint_mappings,
                 last_mapped_src_joint = None)
 
+        # set the scaled root joint position
+        frame_index = len(total_times)
+        translation_src = keyframe_channels_src[rig_src.root_joints[0].name][0].data[frame_index] - root_bind_position_src
+        translation_dest = float3(
+            translation_src.x / rig_translation_scale,
+            translation_src.y / rig_translation_scale,
+            translation_src.z / rig_translation_scale
+        )
+        
         matching_anim_rotations_at_time = {}
         matching_anim_translations_at_time = {}
         for dest_root_joint in rig_dest.root_joints:
-            get_all_anim_rotations(
+            get_all_anim_transformations(
                 joint = dest_root_joint, 
                 matching_anim_rotations = matching_anim_rotations_at_time,
                 matching_anim_translations = matching_anim_translations_at_time)
+
+        # set the dest root joint's location keyframe, scaled by the rig's extent
+        matching_anim_translations_at_time[rig_dest.root_joints[0].name] = float3(
+            translation_dest.x,
+            translation_dest.y,
+            translation_dest.z)
 
         for key in matching_anim_rotations_at_time:
             if not key in total_matching_anim_rotations:
@@ -329,6 +512,8 @@ def translate_keyframe_channels2(
                 total_matching_anim_translations[key] = []
 
             total_matching_anim_translations[key].append(matching_anim_translations_at_time[key])
+
+        
 
         total_times.append(time)
 
@@ -358,6 +543,14 @@ def translate_keyframe_channels2(
             data = total_matching_anim_scales,
             joint_index = i,
             type = 'scale'))
+
+    # save matching animation key frames
+    if save_directory != '':
+        save_matching_keyframes(
+            keyframe_channels = keyframe_channels_dest,
+            src_keyframe_file_path = src_file_path,
+            dest_keyframe_file_path = dest_file_path,
+            keyframe_output_directory = save_directory)
 
     return keyframe_channels_dest
 

@@ -67,6 +67,16 @@ class float4x4:
             
         return float4x4(entries)
         
+     ##
+    @staticmethod
+    def transpose(m):
+        return float4x4([
+            m.entries[0], m.entries[4], m.entries[8], m.entries[12],
+            m.entries[1], m.entries[5], m.entries[9], m.entries[13],
+            m.entries[2], m.entries[6], m.entries[10], m.entries[14],
+            m.entries[3], m.entries[7], m.entries[11], m.entries[15]
+        ])
+
     ##
     def __mul__(self, m):
         entries = [
@@ -394,7 +404,7 @@ class float4x4:
         m.entries[8] * m.entries[2] * m.entries[5])
         
         det = m.entries[0] * inv[0] + m.entries[1] * inv[4] + m.entries[2] * inv[8] + m.entries[3] * inv[12]
-        if det <= 1.0e-5:
+        if abs(det) <= 1.0e-5:
             for i in range(0, 16):
                 invOut[i] = 1.0e9
         
@@ -507,8 +517,8 @@ class float4x4:
         one_over_aspect = 1.0 / aspect
         one_over_far_minus_near = 1.0 / (far - near)
         
-        m00 = d * one_over_aspect
-        m11 = -d
+        m00 = -d * one_over_aspect
+        m11 = d
         #m22 = -(far + near) * one_over_far_minus_near
         #m23 = -1.0
         #m32 = -2.0 * far * near * one_over_far_minus_near

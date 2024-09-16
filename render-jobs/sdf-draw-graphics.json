@@ -1,54 +1,68 @@
 {
     "Type": "Graphics",
-    "PassType": "Mesh Graphics",
-    "Shader": "simple-deferred.shader",
+    "PassType": "Full Triangle",
+    "Shader": "sdf-draw-graphics.shader",
     "Attachments": [
         {
-            "Name" : "World Position Output",
+            "Name" : "Depth Output",
             "Type": "TextureOutput",
             "Format": "rgba32float",
             "ScaleWidth": 1.0,
             "ScaleHeight": 1.0
         },
         {
-            "Name" : "Texture Coordinate Output",
+            "Name" : "Radiance Output",
             "Type": "TextureOutput",
             "Format": "rgba32float",
             "ScaleWidth": 1.0,
             "ScaleHeight": 1.0
         },
         {
-            "Name" : "Normal Output",
+            "Name" : "Position Output",
             "Type": "TextureOutput",
             "Format": "rgba32float",
             "ScaleWidth": 1.0,
             "ScaleHeight": 1.0
         },
         {
-            "Name": "Motion Vector Output",
+            "Name" : "Volumetric Output",
             "Type": "TextureOutput",
             "Format": "rgba32float",
             "ScaleWidth": 1.0,
             "ScaleHeight": 1.0
         },
         {
-            "Name": "Clip Space Output",
+            "Name" : "Debug Output",
             "Type": "TextureOutput",
             "Format": "rgba32float",
             "ScaleWidth": 1.0,
             "ScaleHeight": 1.0
         },
+        
         {
-            "Name": "Skin Clip Space Output",
-            "Type": "TextureOutput",
-            "Format": "rgba32float",
-            "ScaleWidth": 1.0,
-            "ScaleHeight": 1.0
-        },
-        {
-            "Name" : "Previous Skinned Vertex Positions",
+            "Name" : "Brixel Distances",
             "Type": "BufferInput",
-            "ParentJobName": "Copy Temporal Restir"
+            "ParentJobName": "Brick Setup Compute"
+        },
+        {
+            "Name" : "Brixel Radiance",
+            "Type": "BufferInput",
+            "ParentJobName": "Screen Space Brixel Radiance Compute"
+        },
+        {
+            "Name" : "Brick To Brixel Mapping",
+            "Type": "BufferInput",
+            "ParentJobName": "Brick Setup Compute"
+        },
+        {
+            "Name": "Bounding Boxes",
+            "Type": "BufferInput",
+            "ParentJobName": "Skinning Compute"
+        },
+        {
+            "Name" : "Bricks",
+            "Type": "BufferInput",
+            "ParentJobName": "Brick Setup Compute"
         }
     ],
     "ShaderResources": [
@@ -67,7 +81,7 @@
     ],
     "DepthStencilState":
     {
-        "DepthEnable": "True",
+        "DepthEnable": "False",
         "DepthWriteMask": "One",
         "DepthFunc": "LessEqual",
         "StencilEnable": "False"
@@ -75,13 +89,7 @@
     "RasterState":
     {
         "FillMode": "Solid",
-        "CullMode": "Back",
+        "CullMode": "None",
         "FrontFace": "CounterClockwise"
-    },
-    "VertexFormat":
-    [
-        "Vec4",
-        "Vec4",
-        "Vec4"
-    ]
+    }
 }

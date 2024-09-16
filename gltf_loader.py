@@ -593,7 +593,7 @@ def load_gltf(file_path):
     for root_joint in rig.root_joints:
         get_local_transformations(root_joint)
     
-    traverse_joint_blender_debug(rig.root_joints[0])
+    #traverse_joint_blender_debug(rig.root_joints[0])
 
 
     return mesh_positions, mesh_normals, mesh_texcoords, mesh_joint_indices, mesh_joint_weights, mesh_triangle_indices, rig, keyframe_channels, joint_to_node_mappings, inverse_bind_matrix_data
