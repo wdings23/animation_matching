@@ -519,10 +519,6 @@ class float4x4:
         
         m00 = -d * one_over_aspect
         m11 = d
-        #m22 = -(far + near) * one_over_far_minus_near
-        #m23 = -1.0
-        #m32 = -2.0 * far * near * one_over_far_minus_near
-        
         m22 = -far * one_over_far_minus_near
         m23 = -1.0
         m32 = -far * near * one_over_far_minus_near
@@ -554,8 +550,8 @@ class float4x4:
         m03 = -(right + left) / (right - left)
         m11 = 2.0 / height
         m13 = -(top + bottom) / (top - bottom)
-        m22 = 1.0 / far_minus_near
-        m23 = -near / far_minus_near
+        m22 = -2.0 / far_minus_near
+        m23 = -(far + near) / far_minus_near
         
         if inverted:
             m11 = -m11

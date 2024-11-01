@@ -3,6 +3,8 @@ from vec import *
 import os
 import struct
 
+import pywavefront
+
 class MeshResult:
     def __init__(
         self,
@@ -121,6 +123,24 @@ def load_materials(file_path):
     return materials
 
 ##
+def get_position_range(positions):
+    
+    position_length = len(positions)
+    if len(positions[len(positions) - 1]) <= 0:
+        position_length -= 1
+
+    ret = [0, 0]
+    num_positions = 0
+    for index in range(position_length):
+         num_positions += len(positions[index])
+         if index == position_length - 2:
+             ret[0] = num_positions
+
+    ret[1] = num_positions
+
+    return ret
+
+##
 def load_obj2(file_path):
     file_base_name = os.path.basename(file_path)
     file_directory = file_path[:file_path.find(file_base_name)]
@@ -172,12 +192,15 @@ def load_obj2(file_path):
 
     total_materials = []
 
+    separate_mesh_position_ranges = []
+    curr_num_total_positions = 0
+
     curr_mesh_index = 0
     curr_position = 0
     while True:
         if curr_position >= file_size:
             break
-
+        
         end_line_position = file_content.find('\n', curr_position)
         line = file_content[curr_position:end_line_position]
         curr_position = end_line_position + 1
@@ -198,6 +221,8 @@ def load_obj2(file_path):
                 float(tokens[2]),
                 float(tokens[3]))
             )
+
+            curr_num_total_positions += 1
 
         elif tokens[0] == 'vn':
             if len(normals) <= curr_mesh_index:
@@ -264,9 +289,10 @@ def load_obj2(file_path):
             if len(triangle_normal_indices) > 0:
                 face_norm_indices[curr_mesh_index].append(triangle_normal_indices)
 
-
             if len(total_face_position_indices) <= curr_total_material_mesh_index:
                 total_face_position_indices.append([])
+                position_count_range = get_position_range(positions)
+                separate_mesh_position_ranges.append(position_count_range)
 
             if len(total_face_normal_indices) <= curr_total_material_mesh_index:
                 total_face_normal_indices.append([])
@@ -290,7 +316,8 @@ def load_obj2(file_path):
             if len(total_face_position_indices[len(total_face_position_indices) - 1]) > 0:
                 total_face_position_indices.append([])                
                 curr_total_material_mesh_index += 1
-                
+                position_count_range = get_position_range(positions)
+                separate_mesh_position_ranges.append(position_count_range)
 
         elif tokens[0] == 'mtllib':
             material_file = tokens[1]
@@ -318,14 +345,23 @@ def load_obj2(file_path):
                     break
             assert(found_material == True)
 
+            # different material on the same mesh, split the mesh
             if len(total_face_position_indices[curr_total_material_mesh_index]) > 0:
                 total_face_position_indices.append([])
                 curr_total_material_mesh_index += 1
                 assert(len(material_info) == len(total_face_position_indices))
+
+                position_count_range = get_position_range(positions)
+                separate_mesh_position_ranges.append(position_count_range)
+
                 
             if len(total_mesh_names) <= curr_total_material_mesh_index:
                 total_mesh_names.append(mesh_names[len(mesh_names) - 1] + '-' + tokens[1])
                 assert(len(total_mesh_names) == len(material_info))
+
+    # last mesh
+    position_count_range = get_position_range(positions)
+    separate_mesh_position_ranges.append(position_count_range)
 
     triangle_ranges = []
     start_num_triangles = 0
@@ -342,7 +378,19 @@ def load_obj2(file_path):
         curr_num_positions += len(mesh_positions)
         mesh_position_ranges.append(curr_num_positions)
     
-    return total_positions, total_normals, total_uvs, total_face_position_indices, total_face_normal_indices, total_face_uv_indices, material_info, total_mesh_names, total_materials, triangle_ranges, mesh_position_ranges
+    num_mesh_positions = len(total_face_position_indices)
+    while True:
+        erased = False
+        for index in range(num_mesh_positions):
+            if len(total_face_position_indices[index]) <= 0:
+                total_face_position_indices.pop(index)
+                erased = True
+                break
+        if erased == False:
+            break
+        num_mesh_positions = len(total_face_position_indices)
+
+    return total_positions, total_normals, total_uvs, total_face_position_indices, total_face_normal_indices, total_face_uv_indices, material_info, total_mesh_names, total_materials, triangle_ranges, mesh_position_ranges, separate_mesh_position_ranges
 
 class Vertex:
     def __init__(self, position, normal, uv, mesh_id):
@@ -502,21 +550,20 @@ def convert_vertex_buffers_to_bytes(
 
 ##
 def load_obj_file(file_path):
-    total_positions, total_normals, total_uvs, total_face_position_indices, total_face_normal_indices, total_face_uv_indices, material_info, total_mesh_names, total_materials, triangle_ranges, mesh_position_ranges = load_obj2(file_path)
-    
+    total_positions, total_normals, total_uvs, total_face_position_indices, total_face_normal_indices, total_face_uv_indices, material_info, total_mesh_names, total_materials, triangle_ranges, mesh_position_ranges, separate_mesh_ranges = load_obj2(file_path)
+    assert(len(separate_mesh_ranges) == len(total_face_position_indices))
+
     num_meshes = len(total_face_position_indices)
     total_mesh_vertices = []
-    last_mesh_vertex_range = 0
     for mesh_index in range(num_meshes):
         mesh_positions = []
-        mesh_vertex_range = mesh_position_ranges[mesh_index]
-        num_mesh_positions = mesh_vertex_range - last_mesh_vertex_range
+        mesh_vertex_range = separate_mesh_ranges[mesh_index]
+        num_mesh_positions = mesh_vertex_range[1] - mesh_vertex_range[0]
         for i in range(num_mesh_positions):
-            position = total_positions[i + last_mesh_vertex_range]
+            position = total_positions[i + mesh_vertex_range[0]]
             mesh_positions.append(position)
 
         total_mesh_vertices.append(mesh_positions)
-        last_mesh_vertex_range = mesh_vertex_range
 
     total_num_triangle_vertices = 0
     mesh_triangle_vertex_count_range = []
@@ -601,12 +648,11 @@ def load_obj_file(file_path):
 
     min_positions = []
     max_positions = []
-    curr_start = 0
-    for mesh_position_range in mesh_position_ranges:
+    for mesh_position_range in separate_mesh_ranges:
         min_position = float3(100000.0, 100000.0, 1000000.0)
         max_position = float3(-100000.0, -100000.0, -1000000.0)
 
-        for i in range(curr_start, mesh_position_range):
+        for i in range(mesh_position_range[0], mesh_position_range[1]):
             min_position.x = min(min_position.x, total_positions[i].x)
             min_position.y = min(min_position.y, total_positions[i].y)
             min_position.z = min(min_position.z, total_positions[i].z)
@@ -614,8 +660,6 @@ def load_obj_file(file_path):
             max_position.x = max(max_position.x, total_positions[i].x)
             max_position.y = max(max_position.y, total_positions[i].y)
             max_position.z = max(max_position.z, total_positions[i].z)
-
-        curr_start = mesh_position_range
 
         min_positions.append(min_position)
         max_positions.append(max_position)
@@ -644,7 +688,7 @@ def load_obj_file(file_path):
         mesh_face_index_bytes = mesh_face_index_bytes,
         total_triangle_positions_bytes = total_triangle_positions_bytes,
         mesh_triangle_vertex_count_range = mesh_triangle_vertex_count_range,
-        mesh_position_ranges = mesh_position_ranges,
+        mesh_position_ranges = separate_mesh_ranges,
         mesh_min_positions = min_positions,
         mesh_max_positions = max_positions
     )

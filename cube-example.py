@@ -19,7 +19,6 @@ from translate_keyframes import *
 os.add_dll_directory('D:\\test\\python-webgpu')
 import embree_build_bvh_lib
 
-import logging
 import random
 import gen_poisson_disc
 import threading
@@ -32,6 +31,7 @@ from setup_render_job_data import *
 from voxel_debug import *
 
 from brick_setup import *
+from debug_test import *
 
 ##
 def update_skinning_matrices_thread(
@@ -50,7 +50,13 @@ def update_skinning_matrices_thread(
     while True:
 
         while app.skinning_finished == True:
+            if app.canvas.is_closed():
+                break
+
             time.sleep(0.000001)
+
+        if app.canvas.is_closed():
+            break
 
         joint_positions = {}
         joint_rotations = {}
@@ -171,22 +177,7 @@ class MyApp(object):
     
     ##
     def __init__(self):
-        
-        #test_dir = float3(3.0, 0.0, -3.0)
-        #view_dir = float3(0.0, 0.0, 1.0)
-        #sample_pt = float3(0.00015, -0.01393, -0.96792)
-        #orig_pt = float3(0.0, 0.0, -0.86025)
-        #position_diff = sample_pt - orig_pt
-        #dp = float3.dot(position_diff, view_dir)
-        #projected_view_dir = view_dir * dp
-        #diff = position_diff - projected_view_dir
-        #diff_sign = 1.0
-        #if diff.x < 0.0:
-        #    diff_sign = -1.0
-        #diff_length = float3.length(diff)
-        #projected_view_dir_length = float3.length(projected_view_dir)
-        #angle = math.atan2(diff_length * diff_sign, projected_view_dir_length) + math.pi * 0.5
-        
+    
         print("Available adapters on this system:")
         for a in wgpu.gpu.enumerate_adapters():
             print(a.summary)
@@ -206,8 +197,6 @@ class MyApp(object):
         self.render_texture_format = self.present_context.get_preferred_format(self.device.adapter)
         self.present_context.configure(device=self.device, format=self.render_texture_format)
 
-        #self.eye_position = float3(0.0, 0.0, 5.0)
-        #self.eye_position = float3(3.801, 1.8527, 2.655)
         self.eye_position = float3(4.5, 0.5, 1.0)
         self.look_at_position = float3(0.0, 0.0, 0.0)
 
@@ -230,9 +219,27 @@ class MyApp(object):
             usage = wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
             label = 'Default Uniform Data')
 
-        # create render jobs
-        self.load_render_jobs(path = os.path.join(self.dir_path, 'render-jobs', 'render_jobs.json'))
+        self.init_materials('d:\\Downloads\\Bistro_v4\\bistro2.mat')
+        self.albedo_scene_textures, self.albedo_scene_texture_views = self.load_scene_textures(
+            self.albedo_texture_paths
+        )
 
+        self.normal_scene_textures, self.normal_scene_texture_views = self.load_scene_textures(
+            self.normal_texture_paths
+        )
+
+        # create render jobs with total textures in material database
+        self.load_render_jobs(
+            path = os.path.join(self.dir_path, 'render-jobs', 'render_jobs.json'),
+            albedo_texture_array_views = self.albedo_scene_texture_views,
+            normal_texture_array_views = self.normal_scene_texture_views,
+            albedo_texture_array_paths = self.albedo_texture_paths,
+            normal_texture_array_paths = self.normal_texture_paths)
+
+        fp = open('d:\\Downloads\\Bistro_v4\\bistro2-triangles.bin', 'rb')
+        self.binary_mesh_file_content = fp.read()
+        fp.close()
+        
         random.seed()
 
         self.animation_time = 0.0
@@ -247,24 +254,120 @@ class MyApp(object):
             height = 10,
             num_points = self.num_poisson_points)
 
+        halton_sequence = [
+            [0.500000, 0.333333],
+            [0.250000, 0.666667],
+            [0.750000, 0.111111],
+            [0.125000, 0.444444],
+            [0.625000, 0.777778],
+            [0.375000, 0.222222],
+            [0.875000, 0.555556],
+            [0.062500, 0.888889],
+            [0.562500, 0.037037],
+            [0.312500, 0.370370],
+            [0.812500, 0.703704],
+            [0.187500, 0.148148],
+            [0.687500, 0.481481],
+            [0.437500, 0.814815],
+            [0.937500, 0.259259],
+            [0.031250, 0.592593]
+        ]
+
+        self.halton_sequence = []
+        for val in halton_sequence:
+            val[0] = (val[0] * 2.0 - 1.0)
+            val[1] = (val[1] * 2.0 - 1.0)
+
+            self.halton_sequence.append(val)
+
         self.view_projection_matrix = float4x4()
         self.prev_view_projection_matrix = float4x4()
 
         self.mesh_file_path = 'c:\\Users\\Dingwings\\demo-models\\ramen-shop-4.obj'
+        #self.mesh_file_path = 'd:\\Downloads\\Bistro_v4\\bistro.obj'
 
         self.options = {}
         self.options['swap_chain_texture_id'] = 0
-        self.options['ambient_occlusion_distance'] = 2.0
+        self.options['ambient_occlusion_distance'] = 1.0
+        self.options['num_temporal_restir_sample_permutations'] = 1
 
         self.skinning_finished = False
         self.thread_skinning_matrix_bytes = None
         self.skinning_normal_matrix_bytes = None
 
+        self.num_indirect_draw_calls = 0
+        self.num_light_indirect_draw_calls = [0, 0, 0]
+
+        self.num_large_meshes = struct.unpack('I', self.binary_mesh_file_content[0:4])[0]
+        num_total_vertices = struct.unpack('I', self.binary_mesh_file_content[4:8])[0]
+        num_total_triangles = struct.unpack('I', self.binary_mesh_file_content[8:12])[0]
+        vertex_size = struct.unpack('I', self.binary_mesh_file_content[12:16])[0]
+        triangle_start_offset = struct.unpack('I', self.binary_mesh_file_content[16:20])[0]
+        mesh_ranges = []
+        start = 20
+        for i in range(self.num_large_meshes):
+            offset_start = struct.unpack('I', self.binary_mesh_file_content[start:start+4])[0]
+            start += 4
+            offset_end = struct.unpack('I', self.binary_mesh_file_content[start:start+4])[0]
+            start += 4
+            mesh_ranges.append([offset_start, offset_end])
+
+        self.binary_mesh_range = self.binary_mesh_file_content[20:start]
+
+        start_mesh_extent = start
+        mesh_extents = []
+        for i in range(self.num_large_meshes):
+            x = struct.unpack('f', self.binary_mesh_file_content[start:start+4])[0]
+            start += 4
+            y = struct.unpack('f', self.binary_mesh_file_content[start:start+4])[0]
+            start += 4
+            z = struct.unpack('f', self.binary_mesh_file_content[start:start+4])[0]
+            start += 4
+            w = struct.unpack('f', self.binary_mesh_file_content[start:start+4])[0]
+            start += 4
+            min_position = float3(x, y, z)
+            
+            x = struct.unpack('f', self.binary_mesh_file_content[start:start+4])[0]
+            start += 4
+            y = struct.unpack('f', self.binary_mesh_file_content[start:start+4])[0]
+            start += 4
+            z = struct.unpack('f', self.binary_mesh_file_content[start:start+4])[0]
+            start += 4
+            w = struct.unpack('f', self.binary_mesh_file_content[start:start+4])[0]
+            start += 4
+            max_position = float3(x, y, z)
+
+            mesh_extents.append([min_position, max_position])
+
+        self.binary_mesh_extent = self.binary_mesh_file_content[start_mesh_extent:start]
+        file_size = len(self.binary_mesh_file_content)
+
+        end = start + vertex_size * num_total_vertices
+        self.large_vertex_buffer_bytes = self.binary_mesh_file_content[start:end]
+        self.large_index_buffer_bytes = self.binary_mesh_file_content[end:]
+
+        index0 = struct.unpack('I', self.large_index_buffer_bytes[0:4])[0]
+        index1 = struct.unpack('I', self.large_index_buffer_bytes[4:8])[0]
+        index2 = struct.unpack('I', self.large_index_buffer_bytes[8:12])[0]
+
+        self.device_large_vertex_buffer = self.device.create_buffer_with_data(
+            data = self.large_vertex_buffer_bytes,
+            usage = wgpu.BufferUsage.VERTEX | wgpu.BufferUsage.STORAGE
+        )
+
+        self.device_large_index_buffer = self.device.create_buffer_with_data(
+            data = self.large_index_buffer_bytes, 
+            usage = wgpu.BufferUsage.INDEX | wgpu.BufferUsage.STORAGE
+        )
 
     ##
     def load_render_jobs(
         self,
-        path):
+        path,
+        albedo_texture_array_views,
+        normal_texture_array_views,
+        albedo_texture_array_paths,
+        normal_texture_array_paths):
 
         file = open(path, 'rb')
         file_content = file.read()
@@ -351,7 +454,11 @@ class MyApp(object):
             render_job.finish_attachments_and_pipeline(
                 self.device,
                 self.render_jobs,
-                self.default_uniform_buffer)
+                self.default_uniform_buffer,
+                albedo_texture_array_views,
+                normal_texture_array_views,
+                albedo_texture_array_paths,
+                normal_texture_array_paths)
 
     ##
     def convert_mesh_vertices_to_bytes(
@@ -433,6 +540,144 @@ class MyApp(object):
                 ret_bytes += struct.pack('f', matrix.entries[i])
             
         return ret_bytes
+
+    ##
+    def init_materials(
+        self, 
+        full_path):
+        
+        #self.textures = []
+        #self.texture_views = []
+        self.albedo_texture_paths = []
+        self.normal_texture_paths = []
+
+        base_name = os.path.basename(full_path)
+        directory = full_path[:full_path.find(base_name)]
+
+        fp = open(full_path, 'rb')
+        file_content = fp.read()
+        fp.close()
+
+        curr_pos = 0
+        num_materials = 0
+        while True:
+            diffuse_r = struct.unpack('f', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+            diffuse_g = struct.unpack('f', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+            diffuse_b = struct.unpack('f', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+            diffuse_a = struct.unpack('f', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+
+            specular_r = struct.unpack('f', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+            specular_g = struct.unpack('f', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+            specular_b = struct.unpack('f', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+            specular_a = struct.unpack('f', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+
+            emissive_r = struct.unpack('f', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+            emissive_g = struct.unpack('f', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+            emissive_b = struct.unpack('f', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+            emissive_a = struct.unpack('f', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+
+            material_id = struct.unpack('I', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+            albedo_texture_id = struct.unpack('I', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+            normal_texture_id = struct.unpack('I', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+            emissive_texture_id = struct.unpack('I', file_content[curr_pos:curr_pos+4])[0]
+            curr_pos += 4
+        
+            if material_id >= 99999:
+                break
+
+            num_materials += 1
+
+        self.materials_bytes = file_content[:curr_pos]
+        print('number of materials {}'.format(num_materials))
+
+        num_albedo_textures = struct.unpack('I', file_content[curr_pos:curr_pos+4])[0]
+        curr_pos += 4
+        for i in range(num_albedo_textures):
+            
+            # texture file path
+            texture_path_bytes = b''
+            while True:
+                if curr_pos >= len(file_content):
+                    break
+                char = struct.unpack('c', file_content[curr_pos:curr_pos+1])[0]
+                curr_pos += 1
+                if char == b'\n':
+                    break
+                texture_path_bytes += char
+            texture_path = texture_path_bytes.decode('utf-8')
+            file_path = os.path.join(directory, texture_path)
+            self.albedo_texture_paths.append(file_path)
+
+        num_normal_textures = struct.unpack('I', file_content[curr_pos:curr_pos+4])[0]
+        curr_pos += 4
+        for i in range(num_albedo_textures):
+            
+            # texture file path
+            texture_path_bytes = b''
+            while True:
+                if curr_pos >= len(file_content):
+                    break
+                char = struct.unpack('c', file_content[curr_pos:curr_pos+1])[0]
+                curr_pos += 1
+                if char == b'\n':
+                    break
+                texture_path_bytes += char
+            texture_path = texture_path_bytes.decode('utf-8')
+            file_path = os.path.join(directory, texture_path)
+            self.normal_texture_paths.append(file_path)
+
+        
+        '''
+        group_index = 0
+        
+        output_str = ''
+        index = 0
+        texture_index = 0
+        max_textures_per_group = 100
+        group_offset = 3
+        while True:
+            if index >= num_materials:
+                break
+
+            group_index = int(index / max_textures_per_group) + group_offset
+            texture_index = index % max_textures_per_group
+            output_str += '@group({}) @binding({})\nvar normalTexture{}: texture_2d<f32>;\n'.format(group_index, texture_index, index)
+            index += 1
+
+        index = 0
+        while True:
+            if index >= num_materials:
+                break
+
+            if index == 0:
+                output_str += '    if(iTextureID == {}u)\n'.format(index)
+            else:
+                output_str += '    else if(iTextureID == {}u)\n'.format(index)
+            output_str += '    {\n'
+            output_str += '        ret = textureSample(normalTexture{}, textureSampler, uv);\n'.format(index)
+            output_str += '    }\n'
+            
+            index += 1
+
+        file = open(os.path.join(directory, base_name + ".tmp"), 'w')
+        file.write(output_str)
+        file.close()
+       '''
 
     ##
     def init_data(self):
@@ -537,7 +782,8 @@ class MyApp(object):
             total_mesh_joint_weights = mesh_joint_weights,
             total_mesh_joint_indices = mesh_joint_indices)
 
-        mesh_xform_positions, mesh_xform_normals = self.test_skinning_transformations(
+        mesh_xform_positions, mesh_xform_normals = test_skinning_transformations(
+            self,
             joint_to_node_mappings = joint_to_node_mappings, 
             inverse_bind_matrix_data = inverse_bind_matrix_data,
             device = self.device)
@@ -678,7 +924,7 @@ class MyApp(object):
         self.ray_trace_mesh_data['num-indices'] = int(len(self.mesh_obj_result.mesh_face_index_bytes) / 4)
 
         # sky atmosphere uniform data
-        self.light_direction = float3.normalize(float3(0.5, 1.0, 1.0))
+        self.light_direction = float3.normalize(float3(0.2, 0.8, 0.0))
         self.light_radiance = float3(5.0, 5.0, 5.0)
 
         self.device.queue.write_buffer(
@@ -889,9 +1135,9 @@ class MyApp(object):
         # uniform data for spatial restir passes
         if self.frame_index <= 0:
             uniform_bytes = b''
-            sample_radius = 6.0
-            neighbor_block_check = 1
-            num_samples = 12
+            sample_radius = 30.0
+            neighbor_block_check = 0
+            num_samples = 20
             uniform_bytes += struct.pack('f', sample_radius)
             uniform_bytes += struct.pack('i', neighbor_block_check)
             uniform_bytes += struct.pack('i', num_samples)
@@ -904,6 +1150,19 @@ class MyApp(object):
             
             self.device.queue.write_buffer(
                 buffer = self.render_job_dict['Spatial Restir Emissive Graphics'].uniform_buffers[0],
+                buffer_offset = 0,
+                data = uniform_bytes)
+            
+            uniform_bytes = b''
+            sample_radius = 8.0
+            neighbor_block_check = 1
+            num_samples = 6
+            uniform_bytes += struct.pack('f', sample_radius)
+            uniform_bytes += struct.pack('i', neighbor_block_check)
+            uniform_bytes += struct.pack('i', num_samples)
+            uniform_bytes += struct.pack('i', 0)
+            self.device.queue.write_buffer(
+                buffer = self.render_job_dict['Spatial Restir Graphics 1'].uniform_buffers[0],
                 buffer_offset = 0,
                 data = uniform_bytes)
 
@@ -934,6 +1193,47 @@ class MyApp(object):
         )
         self.rig_update_thread.start()
 
+        # material id
+        fp = open('d:\\Downloads\\Bistro_v4\\bistro2.mid', 'rb')
+        file_content = fp.read()
+        fp.close()
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Deferred Indirect Offscreen Graphics'].uniform_buffers[2],
+            buffer_offset = 0,
+            data = file_content)
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Secondary Deferred Indirect Offscreen Graphics'].uniform_buffers[2],
+            buffer_offset = 0,
+            data = file_content)
+        
+        # materials
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Deferred Indirect Offscreen Graphics'].uniform_buffers[1],
+            buffer_offset = 0,
+            data = self.materials_bytes
+        )
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Secondary Deferred Indirect Offscreen Graphics'].uniform_buffers[1],
+            buffer_offset = 0,
+            data = self.materials_bytes
+        )
+
+        # uniform data
+        indirect_uniform_bytes = b''
+        indirect_uniform_bytes += struct.pack('I', self.num_large_meshes)
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Deferred Indirect Offscreen Graphics'].uniform_buffers[0],
+            buffer_offset = 0,
+            data = indirect_uniform_bytes
+        )
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Secondary Deferred Indirect Offscreen Graphics'].uniform_buffers[0],
+            buffer_offset = 0,
+            data = indirect_uniform_bytes
+        )
+
+        self.setup_TLASTest_data()
+
     ##
     def init_draw(self):
         self.canvas.request_draw(self.draw_frame2)
@@ -963,17 +1263,21 @@ class MyApp(object):
 
         self.prev_jitter = self.jitter
 
-        jitter_x = self.poisson_disc_points[self.frame_index % self.num_poisson_points][0]
-        jitter_y = self.poisson_disc_points[self.frame_index % self.num_poisson_points][1]
-        self.jitter_scale = 0.05
-        jitter_matrix = float4x4.translate(
-            float3((jitter_x * self.jitter_scale) / self.screen_width, 
-                   (jitter_y * self.jitter_scale) / self.screen_height,
-                   0.0)
-        )
+        #jitter_x = self.poisson_disc_points[self.frame_index % self.num_poisson_points][0]
+        #jitter_y = self.poisson_disc_points[self.frame_index % self.num_poisson_points][1]
+        jitter_x = self.halton_sequence[self.frame_index % len(self.halton_sequence)][0]
+        jitter_y = self.halton_sequence[self.frame_index % len(self.halton_sequence)][1]
+        self.jitter_scale = 0.7
+        #jitter_matrix = float4x4.translate(
+        #    float3((jitter_x * self.jitter_scale) / self.screen_width, 
+        #           (jitter_y * self.jitter_scale) / self.screen_height,
+        #           0.0)
+        #)
         self.jitter = (jitter_x * self.jitter_scale, jitter_y * self.jitter_scale)
 
-        jittered_perspective_projection_matrix = perspective_projection_matrix * jitter_matrix
+        jittered_perspective_projection_matrix = perspective_projection_matrix
+        jittered_perspective_projection_matrix.entries[3] = (jitter_x * self.jitter_scale) / float(self.screen_width)
+        jittered_perspective_projection_matrix.entries[7] = (jitter_y * self.jitter_scale) / float(self.screen_height)
 
         return perspective_projection_matrix * view_matrix, jittered_perspective_projection_matrix * view_matrix, perspective_projection_matrix, jittered_perspective_projection_matrix
 
@@ -1080,406 +1384,6 @@ class MyApp(object):
             self.uniform_skin_matrix_data.append(skin_matrices_buffer_data)
 
     ##
-    def debug_load_float4(self, input_byte_array, struct_start):
-        ret = float3(0.0, 0.0, 0.0)
-        ret.x = struct.unpack('f', input_byte_array[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        ret.y = struct.unpack('f', input_byte_array[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        ret.z = struct.unpack('f', input_byte_array[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        w = struct.unpack('f', input_byte_array[struct_start:struct_start + 4])[0]
-        struct_start += 4
-
-        return ret, w, struct_start
-    
-    ##
-    def debug_load_uint4(self, input_byte_array, struct_start):
-        x = struct.unpack('I', input_byte_array[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        y = struct.unpack('I', input_byte_array[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        z = struct.unpack('I', input_byte_array[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        w = struct.unpack('I', input_byte_array[struct_start:struct_start + 4])[0]
-        struct_start += 4
-
-        return x, y, z, w, struct_start
-
-    ##
-    def debug_load_uint_array(self, input_byte_array, num_entries, struct_start):
-
-        ret = []
-        for i in range(num_entries):
-            ret.append(struct.unpack('I', input_byte_array[struct_start:struct_start + 4])[0])
-            struct_start += 4
-
-        return ret, struct_start
-
-    ##
-    def debug_load_float_array(self, input_byte_array, num_entries, struct_start):
-
-        ret = []
-        for i in range(num_entries):
-            ret.append(struct.unpack('f', input_byte_array[struct_start:struct_start + 4])[0])
-            struct_start += 4
-
-        return ret, struct_start
-
-    ##
-    def debug_load_float4_array(self, input_byte_array, num_entries, struct_start):
-
-        ret = []
-        for i in range(num_entries):
-            v, _, struct_start = self.debug_load_float4(input_byte_array, struct_start)
-            ret.append(v)
-
-        return ret, struct_start
-
-    ##
-    def debug_load_uint4_array(self, input_byte_array, num_entries, struct_start):
-
-        ret = []
-        for i in range(num_entries):
-            val, struct_start = self.debug_load_uint4(input_byte_array, struct_start)
-            ret.append(val)
-
-        return ret, struct_start
-
-    ##
-    def test_read_back_buffers(self):
-        bvh_node_bytearray = self.device.queue.read_buffer(self.render_job_dict['Build BVH Compute'].attachments['BVH Nodes'])
-        bvh_output_data_bytearray = self.device.queue.read_buffer(self.render_job_dict['Build BVH Compute'].uniform_buffers[4])
-
-        bvh_triangle_index_bytearray = self.device.queue.read_buffer(self.render_job_dict['Build BVH Compute'].uniform_buffers[2])
-
-        debug_data_array = self.device.queue.read_buffer(self.render_job_dict['Build BVH Compute'].uniform_buffers[5])
-        struct_start = 0
-        bounding_boxes, struct_start = self.debug_load_float4_array(debug_data_array, 48, struct_start)
-        num_bin_triangles, struct_start = self.debug_load_uint_array(debug_data_array, 24, struct_start)
-        
-        num_bin_triangles_left, struct_start = self.debug_load_uint_array(debug_data_array, 24, struct_start)
-        areas_left, struct_start = self.debug_load_float_array(debug_data_array, 24, struct_start)
-        num_bin_triangles_right, struct_start = self.debug_load_uint_array(debug_data_array, 24, struct_start)
-        areas_right, struct_start = self.debug_load_float_array(debug_data_array, 24, struct_start)
-
-        bbox_left, struct_start = self.debug_load_float4_array(debug_data_array, 48, struct_start)
-        bbox_right, struct_start = self.debug_load_float4_array(debug_data_array, 48, struct_start)
-
-        left_costs, struct_start = self.debug_load_float_array(debug_data_array, 24, struct_start)
-        right_costs, struct_start = self.debug_load_float_array(debug_data_array, 24, struct_start)
-
-        node_bbox, struct_start = self.debug_load_float4_array(debug_data_array, 16, struct_start)
-
-        x, y, z, w, struct_start = self.debug_load_uint4(debug_data_array, struct_start)
-
-        struct_start = 0
-        verify_triangle_indices = []
-        for i in range(1000):
-            triangle_index = struct.unpack('I', bvh_triangle_index_bytearray[struct_start:struct_start + 4])[0]
-            struct_start += 4
-            verify_triangle_indices.append(triangle_index)
-            #print('{} {}'.format(i, triangle_index))
-
-        num_nodes = struct.unpack('i', bvh_output_data_bytearray[0:4])[0]
-
-        struct_start = 0
-        for i in range(num_nodes):
-            bounding_box_min_x = struct.unpack('f', bvh_node_bytearray[struct_start:struct_start + 4])[0]
-            struct_start += 4
-            bounding_box_min_y = struct.unpack('f', bvh_node_bytearray[struct_start:struct_start + 4])[0]
-            struct_start += 4
-            bounding_box_min_z = struct.unpack('f', bvh_node_bytearray[struct_start:struct_start + 4])[0]
-            struct_start += 8   # add extra 4 for alignment
-
-            bounding_box_max_x = struct.unpack('f', bvh_node_bytearray[struct_start:struct_start + 4])[0]
-            struct_start += 4
-            bounding_box_max_y = struct.unpack('f', bvh_node_bytearray[struct_start:struct_start + 4])[0]
-            struct_start += 4
-            bounding_box_max_z = struct.unpack('f', bvh_node_bytearray[struct_start:struct_start + 4])[0]
-            struct_start += 8   # add extra 4 for alignment
-
-            left_first = struct.unpack('I', bvh_node_bytearray[struct_start:struct_start + 4])[0]
-            struct_start += 4
-
-            num_triangles = struct.unpack('I', bvh_node_bytearray[struct_start:struct_start + 4])[0]
-            struct_start += 4
-
-            level = struct.unpack('I', bvh_node_bytearray[struct_start:struct_start + 4])[0]
-            struct_start += 8
-
-            center = float3(
-                (bounding_box_max_x + bounding_box_min_x) * 0.5,
-                (bounding_box_max_y + bounding_box_min_y) * 0.5,
-                (bounding_box_max_z + bounding_box_min_z) * 0.5
-            )
-            print('{} center: ({}, {}, {}) left: {} right: {} num triangles: {} level {}'.format(
-                i,
-                center.x, 
-                center.y,
-                center.z,
-                left_first, 
-                left_first + 1,
-                num_triangles,
-                level
-            ))
-            
-        debug_data_bytearray = self.device.queue.read_buffer(self.render_job_dict['Build BVH Compute'].uniform_buffers[5])
-        struct_start = 0
-        
-        debug_x0 = struct.unpack('f', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        debug_y0 = struct.unpack('f', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        debug_z0 = struct.unpack('f', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 8
-
-        debug_x1 = struct.unpack('f', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        debug_y1 = struct.unpack('f', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        debug_z1 = struct.unpack('f', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 8
-
-        debug_x2 = struct.unpack('f', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        debug_y2 = struct.unpack('f', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        debug_z2 = struct.unpack('f', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 8
-
-        debug_index0 = struct.unpack('I', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        debug_index1 = struct.unpack('I', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        debug_index2 = struct.unpack('I', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 8
-
-        centroid_x = struct.unpack('f', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        centroid_y = struct.unpack('f', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 4
-        centroid_z = struct.unpack('f', debug_data_bytearray[struct_start:struct_start + 4])[0]
-        struct_start += 8
-
-
-    ##
-    def test_skinning_transformations(
-        self,
-        joint_to_node_mappings, 
-        inverse_bind_matrix_data,
-        device):
-
-        vertex_positions = self.mesh_data['positions']
-        vertex_normals = self.mesh_data['normals']
-        vertex_texcoords = self.mesh_data['texcoords']
-        vertex_joint_indices = self.mesh_data['joint_indices'] 
-        vertex_joint_weights = self.mesh_data['joint_weights']
-
-        self.update_skinning_matrices(
-            joint_to_node_mappings = joint_to_node_mappings, 
-            inverse_bind_matrix_data = inverse_bind_matrix_data,
-            animation_time = 0.2
-        )
-
-        skin_matrices = self.mesh_data['skin_matrices']
-
-        # buffer for the skin matrices
-        matrix_index = 0
-        num_matrix_batches = int(math.ceil(len(skin_matrices) / 16))
-        self.uniform_skin_matrix_buffers = [] * num_matrix_batches
-        self.uniform_skin_matrix_data = [] * num_matrix_batches
-        for i in range(num_matrix_batches):
-            if matrix_index >= len(skin_matrices):
-                break
-
-            skin_matrices_buffer_data = np.empty(
-                [0, 16],
-                dtype = np.float32
-            )
-            for j in range(16):
-                if matrix_index >= len(skin_matrices):
-                    break
-
-                array = np.array([np.array(skin_matrices[matrix_index].entries)], dtype = np.float32)
-                skin_matrices_buffer_data = np.concatenate((skin_matrices_buffer_data, array))
-
-                matrix_index += 1
-
-            self.uniform_skin_matrix_buffers.append(
-                device.create_buffer_with_data(
-                    data = skin_matrices_buffer_data, 
-                    usage = wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_SRC)
-            )
-
-            self.uniform_skin_matrix_data.append(skin_matrices_buffer_data)
-        
-        num_meshes = len(vertex_positions)
-        mesh_xform_positions = []
-        mesh_xform_normals = []
-
-        # transform vertices with skinning matrix
-        for mesh_index in range(num_meshes):
-            num_vertex_positions = len(vertex_positions[mesh_index])
-
-            xform_positions = [float3(0.0, 0.0, 0.0)] * num_vertex_positions
-            xform_normals = [float3(0.0, 0.0, 0.0)] * num_vertex_positions
-
-            positions = vertex_positions[mesh_index]
-            normals = vertex_normals[mesh_index]
-            texcoords = vertex_texcoords[mesh_index]
-            joint_indices = vertex_joint_indices[mesh_index]
-            joint_weights = vertex_joint_weights[mesh_index]
-
-            for vertex_index in range(num_vertex_positions):
-                vertex_position = positions[vertex_index]
-                vertex_normal = normals[vertex_index]
-
-                # blend transformed positions with joint weights    
-                total_xform = float3(0.0, 0.0, 0.0)
-                total_xform_normal = float3(0.0, 0.0, 0.0)
-                total_weights = 0.0
-                for i in range(4):
-                    vertex_joint_index = joint_indices[vertex_index][i]
-                    vertex_joint_weight = joint_weights[vertex_index][i]
-
-                    skinning_matrix = skin_matrices[vertex_joint_index]
-                    normal_matrix = float4x4([
-                        skinning_matrix.entries[0], skinning_matrix.entries[1], skinning_matrix.entries[2], 0.0,
-                        skinning_matrix.entries[4], skinning_matrix.entries[5], skinning_matrix.entries[6], 0.0,
-                        skinning_matrix.entries[8], skinning_matrix.entries[9], skinning_matrix.entries[10], 0.0,
-                        skinning_matrix.entries[12], skinning_matrix.entries[13], skinning_matrix.entries[14], 1.0,
-                    ])
-
-                    xform = skinning_matrix.apply(float3(vertex_position[0], vertex_position[1], vertex_position[2]))
-                    xform_normal = normal_matrix.apply(float3(vertex_normal[0], vertex_normal[1], vertex_normal[2]))
-
-                    total_xform = total_xform + float3(
-                        xform.x * vertex_joint_weight,
-                        xform.y * vertex_joint_weight,
-                        xform.z * vertex_joint_weight)
-
-                    total_xform_normal = total_xform_normal + float3(
-                        xform_normal.x * vertex_joint_weight,
-                        xform_normal.y * vertex_joint_weight,
-                        xform_normal.z * vertex_joint_weight)
-
-                    total_weights += vertex_joint_weight
-
-                xform_positions[vertex_index] = total_xform
-                xform_normals[vertex_index] = total_xform_normal
-                
-            mesh_xform_positions.append(xform_positions)
-            mesh_xform_normals.append(xform_normals)
-        
-        return mesh_xform_positions, mesh_xform_normals
-
-    ##
-    def test_readback_bvh_as_obj(self):
-        for debug_level in range(20):
-
-            bvh_process_info_bytearray = self.device.queue.read_buffer(self.render_job_dict['Initialize Intermediate Nodes Compute'].attachments['BVH Process Info'])
-            bvh_node_level_range_bytearray = self.device.queue.read_buffer(self.render_job_dict['Finish BVH Step Compute'].attachments['Node Level Range'])
-            bvh_node_bytearray = self.device.queue.read_buffer(self.render_job_dict['Initialize Intermediate Nodes Compute'].attachments['Intermediate Nodes'])
-            
-            struct_start = 0
-            node_level, struct_start = self.debug_load_uint_array(bvh_node_level_range_bytearray, 64, struct_start)
-            struct_start = 0
-            process_info, struct_start = self.debug_load_uint_array(bvh_process_info_bytearray, 20, struct_start)
-            struct_start = 0
-            node_bbox, struct_start = self.debug_load_float4_array(bvh_node_bytearray, node_level[debug_level * 3 + 1] * 4, struct_start)
-
-            output_str = ''
-
-            node_index = node_level[debug_level * 3] * 4
-            face_indices = [
-                1, 5, 7, 3,
-                4, 3, 7, 8,
-                8, 7, 5, 6,
-                6, 2, 4, 8,
-                2, 1, 3, 4,
-                6, 5, 1, 2,
-            ]
-            face_normals = [
-                float3(0.0000, 1.0000, 0.0000),
-                float3(0.0000, 0.0000, 1.0000),
-                float3(-1.0000, 0.0000, 0.0000),
-                float3(0.0000, -1.0000, 0.0000),
-                float3(1.0000, 0.0000, 0.0000),
-                float3(0.0000, 0.0000, -1.0000),
-            ]
-
-            while True:
-                
-                end_index = node_level[debug_level * 3 + 1] * 4
-                if node_index >= end_index:
-                    break
-                
-                bbox_center = node_bbox[node_index]
-                bbox_min = node_bbox[node_index + 1]
-                bbox_max = node_bbox[node_index + 2]
-                node_index += 4
-                bbox_size = bbox_max - bbox_min
-                half_bbox_size = bbox_size * 0.5
-
-                pos0 = bbox_center + float3(half_bbox_size.x, half_bbox_size.y, -half_bbox_size.z)
-                pos1 = bbox_center + float3(half_bbox_size.x, -half_bbox_size.y, -half_bbox_size.z)
-                pos2 = bbox_center + float3(half_bbox_size.x, half_bbox_size.y, half_bbox_size.z)
-                pos3 = bbox_center + float3(half_bbox_size.x, -half_bbox_size.y, half_bbox_size.z)
-
-                pos4 = bbox_center + float3(-half_bbox_size.x, half_bbox_size.y, -half_bbox_size.z)
-                pos5 = bbox_center + float3(-half_bbox_size.x, -half_bbox_size.y, -half_bbox_size.z)
-                pos6 = bbox_center + float3(-half_bbox_size.x, half_bbox_size.y, half_bbox_size.z)
-                pos7 = bbox_center + float3(-half_bbox_size.x, -half_bbox_size.y, half_bbox_size.z)
-
-                output_str += 'v {} {} {}\n'.format(pos0.x, pos0.y, pos0.z)
-                output_str += 'v {} {} {}\n'.format(pos1.x, pos1.y, pos1.z)
-                output_str += 'v {} {} {}\n'.format(pos2.x, pos2.y, pos2.z)
-                output_str += 'v {} {} {}\n'.format(pos3.x, pos3.y, pos3.z)
-
-                output_str += 'v {} {} {}\n'.format(pos4.x, pos4.y, pos4.z)
-                output_str += 'v {} {} {}\n'.format(pos5.x, pos5.y, pos5.z)
-                output_str += 'v {} {} {}\n'.format(pos6.x, pos6.y, pos6.z)
-                output_str += 'v {} {} {}\n'.format(pos7.x, pos7.y, pos7.z)
-
-            for normal in face_normals:
-                output_str += 'vn {} {} {}\n'.format(normal.x, normal.y, normal.z)
-
-            node_index = node_level[debug_level * 3] * 4
-            vertex_index = 0
-            while True:
-                
-                end_index = node_level[debug_level * 3 + 1] * 4
-                if node_index >= end_index:
-                    break
-                
-                j = 0
-                while True:
-                    if j >= len(face_indices):
-                        break 
-
-                    output_str += 'f {}/1/{} {}/1/{} {}/1/{} {}/1/{}\n'.format(
-                        face_indices[j] + vertex_index * 8,
-                        int(j / 4 + 1),
-                        face_indices[j + 1] + vertex_index * 8,
-                        int(j / 4 + 1),
-                        face_indices[j + 2] + vertex_index * 8,
-                        int(j / 4 + 1),
-                        face_indices[j + 3] + vertex_index * 8,
-                        int(j / 4 + 1))
-
-                    j += 4
-
-                vertex_index += 1
-                node_index += 4
-
-            full_path = 'c:\\Users\\Dingwings\\demo-models\\bvh-2-level-{}.obj'.format(debug_level)
-            file = open(full_path, 'w')
-            file.write(output_str)
-            file.close()
-
-
-    ##
     def draw_frame2(self):
         start_time = datetime.datetime.now()
         
@@ -1503,7 +1407,7 @@ class MyApp(object):
         #self.eye_position.y += speed
         #self.look_at_position.y += speed
 
-        rotation_speed = 0.1
+        rotation_speed = 0.01
 
         delta_x = (2.0 * math.pi) / 640.0
         delta_y = (2.0 * math.pi) / 480.0
@@ -1552,11 +1456,25 @@ class MyApp(object):
 
             self.canvas.wheel_dy = 0
 
-        # change ambient occlusion distance
+        # keys to strafe and change ambient occlusion distance
+        move_speed = 0.1
         if self.canvas.key_down == 'a':
-            self.options['ambient_occlusion_distance'] += 0.1
+            self.eye_position = self.eye_position + tangent * move_speed
+            self.look_at_position = self.look_at_position + tangent * move_speed
+        elif self.canvas.key_down == 'd':
+            self.eye_position = self.eye_position + tangent * -move_speed
+            self.look_at_position = self.look_at_position + tangent * -move_speed
+        elif self.canvas.key_down == 'w':
+            self.eye_position += view_dir * move_speed
+            self.look_at_position += view_dir *move_speed
+        elif self.canvas.key_down == 's':
+            self.eye_position += view_dir * -move_speed
+            self.look_at_position += view_dir * -move_speed
         elif self.canvas.key_down == 'z':
             self.options['ambient_occlusion_distance'] -= 0.1
+        elif self.canvas.key_down == 'x':
+            self.options['ambient_occlusion_distance'] += 0.1
+
         if self.options['ambient_occlusion_distance'] < 0.0:
             self.options['ambient_occlusion_distance'] = 0.0
 
@@ -1565,14 +1483,15 @@ class MyApp(object):
         quat_y = quaternion.from_angle_axis(float3(1.0, 0.0, 0.0), self.angle_y)
         total_quat = quat_x * quat_y
         total_matrix = total_quat.to_matrix()
-        xform_eye_position = total_matrix.apply(self.eye_position)
+        xform_eye_position = total_matrix.apply(self.eye_position - self.look_at_position)
+        xform_eye_position += self.look_at_position
 
         self.eye_position = xform_eye_position
 
         # update camera with new eye position
         up_direction = float3(0.0, 1.0, 0.0)
         self.camera_near = 1.0
-        self.camera_far = 100.0
+        self.camera_far = 50.0
         view_projection_matrix, \
         jittered_view_projection_matrix, \
         perspective_projection_matrix, \
@@ -1621,7 +1540,7 @@ class MyApp(object):
             view_projection_matrix = view_projection_matrix,
             prev_view_projection_matrix = self.prev_view_projection_matrix,
             view_matrix = self.view_matrix,
-            projection_matrix = perspective_projection_matrix,
+            projection_matrix = jittered_perspective_projection_matrix,
             jittered_view_projection_matrix = self.jittered_view_projection_matrix,
             prev_jittered_view_projection_matrix = self.prev_jittered_view_projection_matrix,
             camera_position = xform_eye_position,
@@ -1725,6 +1644,13 @@ class MyApp(object):
         end_job_group = None 
         start_job_group_index = -1
         render_job_index = 0
+
+        if self.frame_index >= 2:
+            self.render_job_dict['Diffuse Atmosphere Graphics'].draw_enabled = False
+
+        self.set_up_scene_light_view_matrices(
+            light_direction = self.light_direction
+        )
 
         #print('\n***********\n')
         for render_job_index in range(len(self.render_jobs)):
@@ -1848,6 +1774,98 @@ class MyApp(object):
                     render_pass.set_vertex_buffer(0, self.ray_trace_mesh_data['vertex-buffer'])
                     render_pass.draw_indexed(self.ray_trace_mesh_data['num-indices'], 1, 0, 0, 0)
 
+                elif render_job.name == 'Deferred Indirect Offscreen Graphics':
+                    render_pass.set_pipeline(render_job.render_pipeline)
+                    for bind_group_id, bind_group in enumerate(render_job.bind_groups):
+                        render_pass.set_bind_group(bind_group_id, bind_group, [], 0, 99)
+
+                    render_pass.set_index_buffer(self.device_large_index_buffer, wgpu.IndexFormat.uint32)
+                    render_pass.set_vertex_buffer(0, self.device_large_vertex_buffer)
+
+
+                    indirect_offset = 0
+                    for draw_call_index in range(self.num_indirect_draw_calls):
+                        render_pass.draw_indexed_indirect(
+                            indirect_buffer =  self.render_job_dict['Mesh Culling Compute'].attachments['Draw Indexed Calls'],
+                            indirect_offset = indirect_offset
+                        )
+
+                        indirect_offset += (4 * 5)
+
+                elif render_job.name == 'Secondary Deferred Indirect Offscreen Graphics':
+                    render_pass.set_pipeline(render_job.render_pipeline)
+                    for bind_group_id, bind_group in enumerate(render_job.bind_groups):
+                        render_pass.set_bind_group(bind_group_id, bind_group, [], 0, 99)
+
+                    render_pass.set_index_buffer(self.device_large_index_buffer, wgpu.IndexFormat.uint32)
+                    render_pass.set_vertex_buffer(0, self.device_large_vertex_buffer)
+
+                    # get the number of draw calls from the second mesh culling pass
+                    draw_call_count_buffer = self.device.queue.read_buffer(
+                        self.render_job_dict['Mesh Culling Compute'].attachments['Draw Indexed Call Count']
+                    ).tobytes()
+                    self.num_indirect_draw_calls = struct.unpack('I', draw_call_count_buffer[8:12])[0]
+
+                    indirect_offset = 0
+                    for draw_call_index in range(self.num_indirect_draw_calls):
+                        render_pass.draw_indexed_indirect(
+                            indirect_buffer =  self.render_job_dict['Secondary Mesh Culling Compute'].attachments['Draw Indexed Calls'],
+                            indirect_offset = indirect_offset
+                        )
+
+                        indirect_offset += (4 * 5)
+
+                elif render_job.name == 'Light Deferred Indirect Offscreen Graphics 0':
+                    render_pass.set_pipeline(render_job.render_pipeline)
+                    for bind_group_id, bind_group in enumerate(render_job.bind_groups):
+                        render_pass.set_bind_group(bind_group_id, bind_group, [], 0, 99)
+
+                    render_pass.set_index_buffer(self.device_large_index_buffer, wgpu.IndexFormat.uint32)
+                    render_pass.set_vertex_buffer(0, self.device_large_vertex_buffer)
+
+                    indirect_offset = 0
+                    for draw_call_index in range(self.num_light_indirect_draw_calls[0]):
+                        render_pass.draw_indexed_indirect(
+                            indirect_buffer =  self.render_job_dict['Light Mesh Culling Compute 0'].attachments['Draw Indexed Calls'],
+                            indirect_offset = indirect_offset
+                        )
+
+                        indirect_offset += (4 * 5)
+
+                elif render_job.name == 'Light Deferred Indirect Offscreen Graphics 1':
+                    render_pass.set_pipeline(render_job.render_pipeline)
+                    for bind_group_id, bind_group in enumerate(render_job.bind_groups):
+                        render_pass.set_bind_group(bind_group_id, bind_group, [], 0, 99)
+
+                    render_pass.set_index_buffer(self.device_large_index_buffer, wgpu.IndexFormat.uint32)
+                    render_pass.set_vertex_buffer(0, self.device_large_vertex_buffer)
+
+                    indirect_offset = 0
+                    for draw_call_index in range(self.num_light_indirect_draw_calls[1]):
+                        render_pass.draw_indexed_indirect(
+                            indirect_buffer =  self.render_job_dict['Light Mesh Culling Compute 1'].attachments['Draw Indexed Calls'],
+                            indirect_offset = indirect_offset
+                        )
+
+                        indirect_offset += (4 * 5)
+
+                elif render_job.name == 'Light Deferred Indirect Offscreen Graphics 2':
+                    render_pass.set_pipeline(render_job.render_pipeline)
+                    for bind_group_id, bind_group in enumerate(render_job.bind_groups):
+                        render_pass.set_bind_group(bind_group_id, bind_group, [], 0, 99)
+
+                    render_pass.set_index_buffer(self.device_large_index_buffer, wgpu.IndexFormat.uint32)
+                    render_pass.set_vertex_buffer(0, self.device_large_vertex_buffer)
+
+                    indirect_offset = 0
+                    for draw_call_index in range(self.num_light_indirect_draw_calls[2]):
+                        render_pass.draw_indexed_indirect(
+                            indirect_buffer =  self.render_job_dict['Light Mesh Culling Compute 2'].attachments['Draw Indexed Calls'],
+                            indirect_offset = indirect_offset
+                        )
+
+                        indirect_offset += (4 * 5)
+
                 else:
 
                     # vertex and index buffer based on the pass type
@@ -1944,6 +1962,10 @@ class MyApp(object):
             #   render_job_name, render_job_index, 
             #   render_time_delta.microseconds / 1000))
 
+        #time_delta = datetime.datetime.now() - start_time
+        #print('time delta 4: {} milliseconds'.format(time_delta.microseconds / 1000))
+        #start_time = datetime.datetime.now()
+
         #self.device.queue.submit([command_encoder.finish()])
         self.canvas.request_draw()
 
@@ -1966,6 +1988,8 @@ class MyApp(object):
         #start_time = datetime.datetime.now()
 
         self.update_dynamic_bvh()
+
+        self.initialize_render_job_data_per_frame()
 
         #time_delta = datetime.datetime.now() - start_time
         #print('time delta 7: {} milliseconds'.format(time_delta.microseconds / 1000))
@@ -2002,54 +2026,17 @@ class MyApp(object):
         self.scene_info['faces'] = self.mesh_obj_result.total_face_position_indices_bytes
         self.scene_info['mesh_position_index_ranges'] = end_index_bytes
 
-        '''
-        bvh_byte_array = bvh.tobytes()
-        num_bytes = len(bvh_byte_array)
-        struct_start = 0
-        while True:
-            if struct_start >= num_bytes:
-                break
-
-            min_bounds = float3(0.0, 0.0, 0.0)
-            min_bounds.x = struct.unpack('f', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-            min_bounds.y = struct.unpack('f', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-            min_bounds.z = struct.unpack('f', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-
-            max_bounds = float3(0.0, 0.0, 0.0)
-            max_bounds.x = struct.unpack('f', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-            max_bounds.y = struct.unpack('f', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-            max_bounds.z = struct.unpack('f', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-
-            centroid = float3(0.0, 0.0, 0.0)
-            centroid.x = struct.unpack('f', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-            centroid.y = struct.unpack('f', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-            centroid.z = struct.unpack('f', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-
-            child0 = struct.unpack('I', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-            child1 = struct.unpack('I', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-
-            primitive_id = struct.unpack('I', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-
-            mesh_id = struct.unpack('I', bvh_byte_array[struct_start:struct_start + 4])[0]
-            struct_start += 4
-        '''
-
     ##
     def upload_bvh_data(self):
 
         # temporal restir
+        uniform_data_bytes = b''
+        uniform_data_bytes += struct.pack('i', self.options['num_temporal_restir_sample_permutations'])
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Temporal Restir Graphics'].uniform_buffers[0],
+            buffer_offset = 0,
+            data = uniform_data_bytes)
+        
         self.device.queue.write_buffer(
             buffer = self.render_job_dict['Temporal Restir Graphics'].uniform_buffers[1],
             buffer_offset = 0,
@@ -2065,6 +2052,39 @@ class MyApp(object):
             buffer_offset = 0,
             data = self.scene_info['faces'])
         
+        # spatial restir
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Spatial Restir Graphics 0'].uniform_buffers[1],
+            buffer_offset = 0,
+            data = self.scene_info['bvh'])
+        
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Spatial Restir Graphics 0'].uniform_buffers[2],
+            buffer_offset = 0,
+            data = self.scene_info['vertex_positions'])
+        
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Spatial Restir Graphics 0'].uniform_buffers[3],
+            buffer_offset = 0,
+            data = self.scene_info['faces'])
+
+        # ray validation
+        #self.device.queue.write_buffer(
+        #    buffer = self.render_job_dict['Ray Validation Graphics'].uniform_buffers[1],
+        #    buffer_offset = 0,
+        #    data = self.scene_info['bvh'])
+        #
+        #self.device.queue.write_buffer(
+        #    buffer = self.render_job_dict['Ray Validation Graphics'].uniform_buffers[2],
+        #    buffer_offset = 0,
+        #    data = self.scene_info['vertex_positions'])
+        #
+        #self.device.queue.write_buffer(
+        #    buffer = self.render_job_dict['Ray Validation Graphics'].uniform_buffers[3],
+        #    buffer_offset = 0,
+        #    data = self.scene_info['faces'])
+        
+
         # build irradiance cache job
         self.device.queue.write_buffer(
             buffer = self.render_job_dict['Build Irradiance Cache Compute'].uniform_buffers[1],
@@ -2111,7 +2131,89 @@ class MyApp(object):
             buffer_offset = 0,
             data = material_data_bytes
         )
-    
+
+        prev_vertex_count = 0
+        mesh_vertex_range_data_bytes = b''
+        for mesh_vertex_range in self.mesh_obj_result.mesh_triangle_vertex_count_range:
+            mesh_vertex_range_data_bytes += struct.pack('I', prev_vertex_count)
+            mesh_vertex_range_data_bytes += struct.pack('I', mesh_vertex_range)
+            prev_vertex_count = mesh_vertex_range
+        
+        mesh_bbox_bytes = b''
+        num_meshes = len(self.mesh_obj_result.mesh_min_positions)
+        for mesh_index in range(num_meshes):
+            mesh_bbox_bytes += struct.pack('f', self.mesh_obj_result.mesh_min_positions[mesh_index].x)
+            mesh_bbox_bytes += struct.pack('f', self.mesh_obj_result.mesh_min_positions[mesh_index].y)
+            mesh_bbox_bytes += struct.pack('f', self.mesh_obj_result.mesh_min_positions[mesh_index].z)
+            mesh_bbox_bytes += struct.pack('f', 1.0)
+
+
+            mesh_bbox_bytes += struct.pack('f', self.mesh_obj_result.mesh_max_positions[mesh_index].x)
+            mesh_bbox_bytes += struct.pack('f', self.mesh_obj_result.mesh_max_positions[mesh_index].y)
+            mesh_bbox_bytes += struct.pack('f', self.mesh_obj_result.mesh_max_positions[mesh_index].z)
+            mesh_bbox_bytes += struct.pack('f', 1.0)
+
+        uniform_data_bytes = b''
+        #uniform_data_bytes += struct.pack('I', num_meshes)
+        uniform_data_bytes += struct.pack('I', self.num_large_meshes)
+
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Mesh Culling Compute'].uniform_buffers[0],
+            buffer_offset = 0,
+            data = uniform_data_bytes
+        )
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Mesh Culling Compute'].uniform_buffers[1],
+            buffer_offset = 0,
+            data = self.binary_mesh_range 
+        )
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Mesh Culling Compute'].uniform_buffers[2],
+            buffer_offset = 0,
+            data = self.binary_mesh_extent
+        )
+
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Secondary Mesh Culling Compute'].uniform_buffers[0],
+            buffer_offset = 0,
+            data = uniform_data_bytes
+        )
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Secondary Mesh Culling Compute'].uniform_buffers[1],
+            buffer_offset = 0,
+            data = self.binary_mesh_range 
+        )
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Secondary Mesh Culling Compute'].uniform_buffers[2],
+            buffer_offset = 0,
+            data = self.binary_mesh_extent
+        )
+
+        for i in range(3):
+            render_job_name = 'Light Mesh Culling Compute {}'.format(i)
+            self.device.queue.write_buffer(
+                buffer = self.render_job_dict[render_job_name].uniform_buffers[0],
+                buffer_offset = 0,
+                data = uniform_data_bytes
+            )
+            self.device.queue.write_buffer(
+                buffer = self.render_job_dict[render_job_name].uniform_buffers[1],
+                buffer_offset = 0,
+                data = self.binary_mesh_range 
+            )
+            self.device.queue.write_buffer(
+                buffer = self.render_job_dict[render_job_name].uniform_buffers[2],
+                buffer_offset = 0,
+                data = self.binary_mesh_extent
+            )
+
+        num_work_groups = math.ceil(self.num_large_meshes / 256)
+        self.render_job_dict['Mesh Culling Compute'].dispatch_size[0] = int(num_work_groups)
+        self.render_job_dict['Secondary Mesh Culling Compute'].dispatch_size[0] = int(num_work_groups)
+        for i in range(3):
+            render_job_name = 'Light Mesh Culling Compute {}'.format(i)
+            self.render_job_dict[render_job_name].dispatch_size[0] = int(num_work_groups)
+        
     ##
     def get_world_position_from_screen_space(
         self,
@@ -2199,53 +2301,6 @@ class MyApp(object):
             buffer_offset = 0,
             data = uniform_bytes)
 
-        '''
-        look_at_direction = float3.normalize(self.look_at_position - self.eye_position)
-        num_division = 8.0
-        far_minus_near = self.camera_far - self.camera_near
-        div_length = far_minus_near / num_division
-        perspective_projection_matrix = float4x4.perspective_projection_matrix(
-            field_of_view = math.pi * 0.25,
-            view_width = 640,
-            view_height = 480,
-            far = self.camera_far,
-            near = self.camera_near
-        )
-
-        curr_z = -1.0
-        while True:
-            if curr_z <= -100.0:
-                break
-
-            curr_z += -0.1
-            xform, w = perspective_projection_matrix.apply2(float3(0.0, 0.0, curr_z))
-            depth = xform.z / w
-            print('z: {} depth: {}'.format((curr_z + 1.0) * -1.0, depth))
-
-        print('')
-        '''
-        
-        '''
-        test_light_view_matrix = float4x4.view_matrix(
-            eye_position = float3(0.37793, 1.47008, 0.6715), 
-            look_at = float3(0.337, 0.6515, 0.6715), 
-            up = float3(1.0, 0.0, 0.0)
-        )
-        
-        test_light_projection_matrix = float4x4.orthographic_projection_matrix(
-            left = -0.8196,
-            right = 0.8196,
-            top = 0.8916,
-            bottom = -0.8916,
-            far = 1.6596,
-            near = -1.6596,
-            inverted = False
-        )
-
-        test_light_view_projection_matrix = test_light_projection_matrix * test_light_view_matrix
-        '''
-
-
         return uniform_bytes, light_view_matrix, light_projection_matrix
 
     ##
@@ -2254,9 +2309,14 @@ class MyApp(object):
             render_job = self.render_job_dict[render_job_key]
 
             for user_data in render_job.shader_resource_user_data:
+                data_type = user_data[3]
 
                 uniform_bytes = b''
-                uniform_bytes += struct.pack('I', user_data[1])
+                if data_type == 'int':
+                    uniform_bytes += struct.pack('I', user_data[1])
+                elif data_type == 'float':
+                    uniform_bytes += struct.pack('f', user_data[1])
+
                 uniform_buffer_index = user_data[0]
                 self.device.queue.write_buffer(
                     buffer = render_job.uniform_buffers[uniform_buffer_index],
@@ -2337,7 +2397,7 @@ class MyApp(object):
             static_vertex_end_index_bytes = b''
             for mesh_index in range(num_static_meshes):
                 position_range = self.mesh_obj_result.mesh_position_ranges[mesh_index]
-                static_vertex_end_index_bytes += struct.pack('I', position_range)
+                static_vertex_end_index_bytes += struct.pack('I', position_range[1])
             
             curr_num_static_mesh_triangles = 0
             static_triangle_end_index_bytes = b''
@@ -2394,6 +2454,461 @@ class MyApp(object):
                 buffer = self.render_job_dict['Temporal Restir Emissive Graphics'].uniform_buffers[5],
                 buffer_offset = 0,
                 data = total_mesh_triangle_indices_bytes)
+
+    ##
+    def initialize_render_job_data_per_frame(self):
+        
+        draw_call_count_buffer = self.device.queue.read_buffer(
+            self.render_job_dict['Mesh Culling Compute'].attachments['Draw Indexed Call Count']
+        ).tobytes()
+        self.num_indirect_draw_calls = struct.unpack('I', draw_call_count_buffer[0:4])[0]
+
+        for i in range(3):
+            light_cull_render_job_name = 'Light Mesh Culling Compute {}'.format(i)
+            draw_call_count_buffer = self.device.queue.read_buffer(
+                self.render_job_dict[light_cull_render_job_name].attachments['Draw Indexed Call Count']
+            ).tobytes()
+            self.num_light_indirect_draw_calls[i] = struct.unpack('I', draw_call_count_buffer[0:4])[0]
+
+        zero_bytes = b''
+        for i in range(128):
+            zero_bytes += struct.pack('i', 0)
+
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Mesh Culling Compute'].attachments['Draw Indexed Call Count'],
+            buffer_offset = 0,
+            data = zero_bytes)
+        
+        for i in range(3):
+            render_job_name = 'Light Mesh Culling Compute {}'.format(i)
+            self.device.queue.write_buffer(
+                buffer = self.render_job_dict[render_job_name].attachments['Draw Indexed Call Count'],
+                buffer_offset = 0,
+                data = zero_bytes)
+        
+        
+
+    ##
+    def convert_specular_images(self):
+        for root, directories, files in os.walk('D:\\Downloads\\Bistro_v4\\Textures'):
+            for file in files:
+                if file.find('_Specular.dds') < 0:
+                    continue
+
+                full_path = os.path.join(root, file)
+                image = Image.open(full_path, 'r')
+
+                base_name_end = file.rfind('.')
+                base_name = file[:base_name_end]
+                output_full_path = 'd:\\Downloads\\Bistro_v4\\converted-textures\\' + base_name + '.png'
+                output_image = image.save(output_full_path)
+
+    ##
+    def convert_emissive_images(self):
+        for root, directories, files in os.walk('D:\\Downloads\\Bistro_v4\\Textures'):
+            for file in files:
+                if file.find('_Emissive.dds') < 0:
+                    continue
+
+                full_path = os.path.join(root, file)
+                image = Image.open(full_path, 'r')
+
+                base_name_end = file.rfind('.')
+                base_name = file[:base_name_end]
+                output_full_path = 'd:\\Downloads\\Bistro_v4\\converted-textures\\' + base_name + '.png'
+                output_image = image.save(output_full_path)
+
+    ##
+    def set_up_scene_light_view_matrices(
+        self, 
+        light_direction):
+        
+        light_up = float3(0.0, 1.0, 0.0)
+        if abs(light_direction.y) > 0.98:
+            light_up = float3(1.0, 0.0, 0.0)
+
+        view_direction = float3.normalize(self.look_at_position - self.eye_position)
+
+        light_view_matrices = []
+        light_projection_matrices = []
+        light_view_projection_matrices = []
+
+        # divide up frustum and set the light's look at position at the middle of the frustum division
+        # then move from the center in the light direction with the radius of the frustum division
+        
+        # frustum corners' world position
+        inverse_view_projection = float4x4.invert(self.view_projection_matrix)
+        frustum_div_pct = [0.0, 0.7, 0.92, 1.0]
+        frustum_corners = []
+        for frustum_div in range(len(frustum_div_pct)):
+            curr_z = frustum_div_pct[frustum_div]
+
+            # front-top
+            corner_pos = float3(        # left 
+                -1.0,
+                1.0,
+                curr_z
+            )
+            frustum_corners.append(corner_pos)
+            corner_pos = float3(        # right
+                1.0,
+                1.0,
+                curr_z
+            )
+            frustum_corners.append(corner_pos)
+            # front-bottom
+            corner_pos = float3(        # left
+                -1.0,
+                -1.0,
+                curr_z
+            )
+            frustum_corners.append(corner_pos)
+            corner_pos = float3(        # right
+                1.0,
+                -1.0,
+                curr_z
+            )
+            frustum_corners.append(corner_pos)
+
+        # frustum corners to world position
+        frustum_corner_world_positions = []
+        for frustum_corner_pos in frustum_corners:
+            world_position = inverse_view_projection.apply2(frustum_corner_pos)
+            w = world_position[1]
+            if w == 0.0:
+                w = 1.0 / self.camera_far
+            frustum_corner_world_positions.append(world_position[0] * (1.0 / w))
+
+        # center of the frustum divisions
+        frustum_center_world_position = []
+        for i in range(len(frustum_div_pct) - 1):
+            start_index = i * 4
+            frustum_center = float3(0.0, 0.0, 0.0)
+            for i in range(8):
+                world_position = frustum_corner_world_positions[start_index + i]
+                frustum_center += world_position
+            frustum_center = frustum_center * (1.0 / 8.0)
+            frustum_center_world_position.append(frustum_center)
+
+        # light view matrices
+        for i in range(3):
+            light_view_matrix = float4x4.view_matrix(
+                eye_position = frustum_center_world_position[i] + self.light_direction,
+                look_at = frustum_center_world_position[i],
+                up = light_up
+            )
+            light_view_matrices.append(light_view_matrix)
+
+        # frustum corners to light view
+        light_view_corners = []
+        for i in range(3):
+
+            start_index = i * 4
+            corner_positions = []
+            for j in range(8):
+                corner_pos = frustum_corner_world_positions[start_index + j]
+                corner_light_pos = light_view_matrices[i].apply2(corner_pos)
+                corner_positions.append(corner_light_pos[0])
+            light_view_corners.append(corner_positions)
+
+        # min max of the frustum division corners from light view
+        light_view_frustum_division_min_max_pos = []
+        for i in range(3):
+            min_pos = float3(9999.0, 9999.0, 9999.0)
+            max_pos = float3(-9999.0, -9999.0, -9999.0)
+
+            for j in range(8):
+                index = start_index + j
+
+                min_pos.x = min(light_view_corners[i][j].x, min_pos.x)
+                min_pos.y = min(light_view_corners[i][j].y, min_pos.y)
+                min_pos.z = min(light_view_corners[i][j].z, min_pos.z)
+
+                max_pos.x = max(light_view_corners[i][j].x, max_pos.x)
+                max_pos.y = max(light_view_corners[i][j].y, max_pos.y)
+                max_pos.z = max(light_view_corners[i][j].z, max_pos.z)
+
+            
+            z_near_mult = 1.0
+            z_far_mult = 1.0
+            if i == 0:
+                z_near_mult = 10.0
+                z_far_mult = 10.0
+
+                if min_pos.z >= 0.0:
+                    z_near_mult *= -1.0
+                if max_pos.z < 0.0:
+                    z_far_mult *= -1.0
+
+            elif i == 1:
+                z_far_mult = 6.0
+                z_near_mult = 6.0
+            elif i == 2:
+                z_near_mult = 4.0
+                z_near_mult = 8.0
+
+            min_pos.z *= z_near_mult
+            max_pos.z *= z_far_mult
+            light_view_frustum_division_min_max_pos.append([min_pos, max_pos])
+
+        view_port_mult = 1.25
+        for i in range(3):
+            min_max_pos = light_view_frustum_division_min_max_pos[i]
+            
+            if i == 0:
+                min_max_pos[1].z = 10.0
+                min_max_pos[0].z = -10.0
+            light_projection_matrix = float4x4.orthographic_projection_matrix(
+                left = min_max_pos[0].x * view_port_mult,
+                right = min_max_pos[1].x * view_port_mult,
+                top = min_max_pos[1].y * view_port_mult,
+                bottom = min_max_pos[0].y * view_port_mult,
+                far = min_max_pos[1].z,
+                near = min_max_pos[0].z,
+                inverted = False
+            )
+            light_projection_matrices.append(light_projection_matrix)
+            
+        for i in range(3):
+            light_view_projection_matrix = light_projection_matrices[i] * light_view_matrices[i]
+            light_view_projection_matrices.append(light_view_projection_matrix)
+            
+        '''
+        frustum_div_center = [2.0, 6.0, 12.0]
+        radii = [6.0, 10.0, 18.0]
+        curr_look_at_frustum_position = self.eye_position
+        for i in range(3):
+            curr_radius = radii[i]
+            curr_look_at_frustum_position = curr_look_at_frustum_position + view_direction * frustum_div_center[i]
+            light_position = curr_look_at_frustum_position + light_direction * curr_radius
+            light_view_matrix = float4x4.view_matrix(
+                eye_position = light_position, 
+                look_at = curr_look_at_frustum_position, 
+                up = light_up)
+            light_projection_matrix = float4x4.orthographic_projection_matrix(
+                left = -radius * 1.0,
+                right = radius * 1.0,
+                top = radius * 1.0,
+                bottom = -radius * 1.0,
+                far = radius * -4.0,
+                near = radius * 0.0,
+                inverted = False
+            )
+            curr_look_at_frustum_position = curr_look_at_frustum_position + view_direction * radii[i]
+
+            light_view_projection_matrix = light_projection_matrix * light_view_matrix
+            light_view_matrices.append(light_view_matrix)
+            light_projection_matrices.append(light_projection_matrix)
+            light_view_projection_matrices.append(light_view_projection_matrix)
+        '''
+
+        # copy the light view matrices to the light mesh culling and light mesh drawing pass
+        total_light_view_projection_matrices_uniform_bytes = b''
+        for pass_index in range(3):
+            culling_render_job_name = 'Light Mesh Culling Compute {}'.format(pass_index)
+            draw_render_job_name = 'Light Deferred Indirect Offscreen Graphics {}'.format(pass_index)
+
+            uniform_bytes = b''
+            for i in range(16):
+                uniform_bytes += struct.pack('f', light_view_matrices[pass_index].entries[i])
+            for i in range(16):
+                uniform_bytes += struct.pack('f', light_projection_matrices[pass_index].entries[i])
+            for i in range(16):
+                uniform_bytes += struct.pack('f', light_view_projection_matrices[pass_index].entries[i])
+            uniform_bytes += struct.pack('I', self.num_large_meshes)
+
+            self.device.queue.write_buffer(
+                buffer = self.render_job_dict[culling_render_job_name].uniform_buffers[0],
+                buffer_offset = 0,
+                data = uniform_bytes)
+
+            uniform_bytes = b''
+            for i in range(16):
+                uniform_bytes += struct.pack('f', light_view_projection_matrices[pass_index].entries[i])
+                total_light_view_projection_matrices_uniform_bytes += struct.pack('f', light_view_projection_matrices[pass_index].entries[i])
+            self.device.queue.write_buffer(
+                buffer = self.render_job_dict[draw_render_job_name].uniform_buffers[0],
+                buffer_offset = 0,
+                data = uniform_bytes)
+        
+        # all the light matrices to the composite pass
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['Deferred Indirect Offscreen Lighting Graphics'].uniform_buffers[0],
+            buffer_offset = 0,
+            data = total_light_view_projection_matrices_uniform_bytes
+        )
+
+    ##
+    def load_scene_textures(
+        self,
+        texture_paths):
+
+        texture_array = []
+        texture_view_array = []
+        for texture_path in texture_paths:
+            image = Image.open(texture_path, mode = 'r')
+            
+            # scale down the image
+            flipped_image = None
+            if image.width >= 256 or image.width >= 256:
+                scale_width = 256.0 / float(image.width)
+                scale_height = 256.0 / float(image.height)
+                scaled_image = image.resize((int(image.width * scale_width), int(image.height * scale_height)))
+                flipped_image = scaled_image.transpose(method = Image.Transpose.FLIP_TOP_BOTTOM)
+            else:     
+                flipped_image = image.transpose(method = Image.Transpose.FLIP_TOP_BOTTOM)
+
+            if image.mode != 'RGBA':    
+                image = flipped_image.convert(mode = 'RGBA')
+            else:
+                image = flipped_image
+                    
+            # create texture
+            image_byte_array = image.tobytes()
+            texture_width = image.width
+            texture_height = image.height
+            texture_size = texture_width, texture_height, 1
+            texture_format = wgpu.TextureFormat.rgba8unorm
+            texture = self.device.create_texture(
+                size=texture_size,
+                usage=wgpu.TextureUsage.COPY_DST | wgpu.TextureUsage.TEXTURE_BINDING,
+                dimension=wgpu.TextureDimension.d2,
+                format=texture_format,
+                mip_level_count=1,
+                sample_count=1,
+                label = texture_path
+            )
+            texture_array.append(texture)
+
+            # upload texture data
+            self.device.queue.write_texture(
+                {
+                    'texture': texture_array[len(texture_array) - 1],
+                    'mip_level': 0,
+                    'origin': (0, 0, 0),
+                },
+                image_byte_array,
+                {
+                    'offset': 0,
+                    'bytes_per_row': texture_width * 4
+                },
+                texture_size
+            )
+
+            texture_view_array.append(texture_array[len(texture_array) - 1].create_view())
+
+        return texture_array, texture_view_array
+    
+    ## TLAS TEST ##
+    def setup_TLASTest_data(self):
+        
+        bvh_file = open('d:\\Downloads\\Bistro_v4\\bvh-obj\\bistro2-triangle-tlas-bvh.bin', 'rb')
+        bistro_tlas_bvh_bytes = bvh_file.read()
+        bvh_file.close()
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['TLAS Test Graphics'].uniform_buffers[1], 
+            buffer_offset = 0,
+            data = bistro_tlas_bvh_bytes
+        )
+
+        bvh_file = open('d:\\Downloads\\Bistro_v4\\bvh-obj\\bistro2-triangle-blas-node-partition-indices.bin', 'rb')
+        bistro_blas_node_index_bytes = bvh_file.read()
+        bvh_file.close()
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['TLAS Test Graphics'].uniform_buffers[4], 
+            buffer_offset = 0,
+            data = bistro_blas_node_index_bytes
+        )
+
+        '''        
+        # split up BLAS node indices to allowed memory size
+        bvh_node_size = 64
+        blas_node_index_array = []
+        bin_array_index = 0
+        total_bytes = 0
+        prev_num_total_blas_node = 0
+        start_node_offset = 0
+        part_index = 0
+        split_bytes = []
+
+        blas_node_index_array.append([0, part_index])
+        for mesh_index in range(self.num_large_meshes):
+            num_total_blas_node = struct.unpack('I', bistro_blas_num_node_bytes[bin_array_index:bin_array_index+4])[0] - start_node_offset
+            num_blas_node = num_total_blas_node - prev_num_total_blas_node
+
+            # overran fixed size
+            if total_bytes + num_blas_node * bvh_node_size > 200000000:
+                part_index += 1
+                start_node_offset = prev_num_total_blas_node
+                split_bytes.append([prev_num_total_blas_node, mesh_index - 1, total_bytes])
+                num_total_blas_node = struct.unpack('I', bistro_blas_num_node_bytes[bin_array_index:bin_array_index+4])[0] - start_node_offset
+                prev_num_total_blas_node = 0
+                total_bytes = 0
+            
+            blas_node_index_array.append([num_total_blas_node, part_index])
+            total_bytes += num_blas_node * bvh_node_size
+            prev_num_total_blas_node = num_total_blas_node
+            
+            bin_array_index += 4
+        
+
+        node_indices_bytes = b''
+        for i in range(len(blas_node_index_array)):
+            blas_node_index = blas_node_index_array[i]
+            node_indices_bytes += struct.pack('I', blas_node_index[0])
+            node_indices_bytes += struct.pack('I', blas_node_index[1])
+        
+
+        bvh_file = open('d:\\Downloads\\Bistro_v4\\bvh-obj\\bistro2-triangle-blas-bvh.bin', 'rb')
+        bistro_blas_bvh_bytes = bvh_file.read()
+        split_offset = split_bytes[0][2]
+        bistro_blas_bvh_bytes_0 = bistro_blas_bvh_bytes[:split_offset]
+        bistro_blas_bvh_bytes_1 = bistro_blas_bvh_bytes[split_offset:]
+        bvh_file.close()
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['TLAS Test Graphics'].uniform_buffers[2], 
+            buffer_offset = 0,
+            data = bistro_blas_bvh_bytes_0
+        )
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['TLAS Test Graphics'].uniform_buffers[3], 
+            buffer_offset = 0,
+            data = bistro_blas_bvh_bytes_1
+        )
+        '''
+
+        bvh_file_0 = open('d:\\Downloads\\Bistro_v4\\bvh-obj\\bistro2-triangle-blas-bvh-0.bin', 'rb')
+        bistro_blas_bvh_bytes_0 = bvh_file_0.read()
+        bvh_file_0.close()
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['TLAS Test Graphics'].uniform_buffers[2], 
+            buffer_offset = 0,
+            data = bistro_blas_bvh_bytes_0
+        )
+
+        bvh_file_1 = open('d:\\Downloads\\Bistro_v4\\bvh-obj\\bistro2-triangle-blas-bvh-1.bin', 'rb')
+        bistro_blas_bvh_bytes_1 = bvh_file_1.read()
+        bvh_file_1.close()
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['TLAS Test Graphics'].uniform_buffers[3], 
+            buffer_offset = 0,
+            data = bistro_blas_bvh_bytes_1
+        )
+
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['TLAS Test Graphics'].uniform_buffers[5], 
+            buffer_offset = 0,
+            data = self.large_vertex_buffer_bytes
+        )
+        self.device.queue.write_buffer(
+            buffer = self.render_job_dict['TLAS Test Graphics'].uniform_buffers[6], 
+            buffer_offset = 0,
+            data = self.large_index_buffer_bytes
+        )
+
+        vertex_buffer_byte_size = len(self.large_vertex_buffer_bytes)
+        index_buffer_byte_size = len(self.large_index_buffer_bytes)
+
 
 ##
 class BitField(object):

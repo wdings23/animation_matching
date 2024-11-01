@@ -85,8 +85,17 @@ class RenderJob(object):
         self, 
         device, 
         total_render_jobs,
-        default_uniform_buffer):
+        default_uniform_buffer,
+        albedo_texture_array_views,
+        normal_texture_array_views,
+        albedo_texture_array_paths,
+        normal_texture_array_paths):
         
+        self.albedo_texture_array_paths = albedo_texture_array_paths
+        self.normal_texture_array_paths = normal_texture_array_paths
+        self.albedo_texture_array_views = albedo_texture_array_views
+        self.normal_texture_array_views = normal_texture_array_views
+
         # process the attachments that were delayed due to ordering of the render jobs
         self.process_delayed_attachments(total_render_jobs)
 
@@ -196,6 +205,18 @@ class RenderJob(object):
                     attachment_format = wgpu.TextureFormat.rgba32float
                 elif attachment_format_str == 'bgra8unorm-srgb':
                     attachment_format = wgpu.TextureFormat.bgra8unorm_srgb
+                elif attachment_format_str == 'rgba16float':
+                    attachment_format = wgpu.TextureFormat.rgba16float
+                elif attachment_format_str == 'r32float':
+                    attachment_format = wgpu.TextureFormat.r32float
+                elif attachment_format_str == 'r32float':
+                    attachment_format = wgpu.TextureFormat.r16float
+                elif attachment_format_str == 'r16float':
+                    attachment_format = wgpu.TextureFormat.r32float
+                elif attachment_format_str == 'rg16float':
+                    attachment_format = wgpu.TextureFormat.rg16float
+                elif attachment_format_str == 'rg16float':
+                    attachment_format = wgpu.TextureFormat.rg16float
 
                 texture_usage = wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.RENDER_ATTACHMENT | wgpu.TextureUsage.COPY_SRC
                 if self.type == 'Copy':
@@ -283,7 +304,7 @@ class RenderJob(object):
 
                 self.attachments[attachment_name] = device.create_buffer(
                     size = buffer_size, 
-                    usage = usage | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
+                    usage = usage | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC | wgpu.BufferUsage.INDIRECT,
                     label = attachment_name
                 )
 
@@ -455,7 +476,10 @@ class RenderJob(object):
 
                 if 'resource_data' in shader_resource_entry:
                     for data in shader_resource_entry['resource_data']:
-                        copy_data = [shader_resource_index, data['data'], data['offset']]
+                        data_type = 'int'
+                        if 'type' in data:
+                            data_type = data['type']
+                        copy_data = [shader_resource_index, data['data'], data['offset'], data_type]
                         self.shader_resource_user_data.append(copy_data)
 
 
@@ -527,6 +551,9 @@ class RenderJob(object):
 
         print('"{}"'.format(self.name))
 
+        if self.name == 'Deferred Indirect Offscreen Graphics':
+            print('')
+
         # We always have two bind groups, so we can play distributing our
         # resources over these two groups in different configurations.
         bind_groups_entries = [[]]
@@ -536,6 +563,7 @@ class RenderJob(object):
         num_input_attachments = 0
         num_input_texture_attachments = 0
         num_input_buffer_attachments = 0
+        added_sampler = False
         for attachment_index in range(len(self.attachments)):
             
             key = self.attachment_info[attachment_index]['Name']
@@ -782,7 +810,7 @@ class RenderJob(object):
                     "binding": binding_index,
                     "visibility": shader_stage,
                     "texture": {
-                        "sample_type": wgpu.TextureSampleType.unfilterable_float,
+                        "sample_type": wgpu.TextureSampleType.float,
                         "view_dimension": wgpu.TextureViewDimension.d2,
                     }
                 }
@@ -795,15 +823,18 @@ class RenderJob(object):
                     shader_resource_entry['size'], 
                     shader_stage, 
                     usage))
-
+            
             binding_index += 1
-
+        
         # create sampler for textures
         num_attachment_binding_groups = len(bind_groups_entries[0])
         if len(self.texture_views) > 0 or num_input_texture_attachments > 0:
             
             # nearest point sampler 
-            self.nearest_sampler = device.create_sampler()
+            self.nearest_sampler = device.create_sampler(
+                address_mode_u = wgpu.AddressMode.mirror_repeat,
+                address_mode_v = wgpu.AddressMode.mirror_repeat
+            )
             bind_groups_entries[0].append(
                 {
                     "binding": num_attachment_binding_groups,
@@ -814,7 +845,9 @@ class RenderJob(object):
             # linear sampler
             self.linear_sampler = device.create_sampler(
                 min_filter = wgpu.FilterMode.linear,
-                mag_filter =  wgpu.FilterMode.linear
+                mag_filter =  wgpu.FilterMode.linear,
+                address_mode_u = wgpu.AddressMode.repeat,
+                address_mode_v = wgpu.AddressMode.repeat
             )
             bind_groups_entries[0].append(
                 {
@@ -848,6 +881,8 @@ class RenderJob(object):
                 }
             )
 
+            added_sampler = True
+
             print('\tnearest sampler: group: 0, binding: {}'.format(
                     num_attachment_binding_groups))
 
@@ -855,7 +890,7 @@ class RenderJob(object):
                     num_attachment_binding_groups + 1))
 
         # layout for default uniform buffer
-        bind_group_index = len(bind_groups_entries) - 1
+        #bind_group_index = len(bind_groups_entries) - 1
         shader_stage = wgpu.ShaderStage.VERTEX | wgpu.ShaderStage.FRAGMENT | wgpu.ShaderStage.COMPUTE
         bind_groups_entries[bind_group_index].append(
             {
@@ -878,22 +913,96 @@ class RenderJob(object):
                 },
             }
         )
+        num_attachment_binding_groups += 1
 
-        print('\tdefault uniform buffer: group 1, binding: {}'.format(binding_index))
+        print('\tdefault uniform buffer: group {}, binding: {}'.format(bind_group_index, binding_index))
 
+        has_texture_array = False
+        if 'UseGlobalTextures' in self.render_job_dict:
+            if self.render_job_dict['UseGlobalTextures'] == 'True':
+                has_texture_array = True 
 
-        # Create the wgou binding objects
-        bind_group_layouts = []
+        if has_texture_array == True:
+            
+            if added_sampler == False:
+                # nearest point sampler 
+                self.nearest_sampler = device.create_sampler(
+                    address_mode_u = wgpu.AddressMode.mirror_repeat,
+                    address_mode_v = wgpu.AddressMode.mirror_repeat
+                )
+                bind_groups_entries[0].append(
+                    {
+                        "binding": num_attachment_binding_groups,
+                        "resource": self.nearest_sampler
+                    }
+                )
+
+                # linear sampler
+                self.linear_sampler = device.create_sampler(
+                    min_filter = wgpu.FilterMode.linear,
+                    mag_filter =  wgpu.FilterMode.linear,
+                    address_mode_u = wgpu.AddressMode.repeat,
+                    address_mode_v = wgpu.AddressMode.repeat
+                )
+                bind_groups_entries[0].append(
+                    {
+                        "binding": num_attachment_binding_groups + 1,
+                        "resource": self.linear_sampler
+                    }
+                )
+
+                # layout of nearest sampler
+                shader_stage = wgpu.ShaderStage.FRAGMENT
+                if self.type == 'Compute':
+                    shader_stage = wgpu.ShaderStage.COMPUTE
+                bind_groups_layout_entries[0].append(
+                    {
+                        "binding": num_attachment_binding_groups,
+                        "visibility": shader_stage,
+                        "sampler": {
+                            "type": wgpu.SamplerBindingType.non_filtering
+                        }
+                    }
+                )
+
+                # layout for linear sampler
+                bind_groups_layout_entries[0].append(
+                    {
+                        "binding": num_attachment_binding_groups + 1,
+                        "visibility": shader_stage,
+                        "sampler": {
+                            "type": wgpu.SamplerBindingType.filtering
+                        }
+                    }
+                )
+
+                print('\tnearest sampler: group: 0, binding: {}'.format(
+                        num_attachment_binding_groups))
+
+                print('\tlinear sampler: group: 0, binding: {}'.format(
+                        num_attachment_binding_groups + 1))
+
+            self.add_textures_to_pass(
+                device = device, 
+                albedo_texture_array_views = self.albedo_texture_array_views,
+                normal_texture_array_views = self.normal_texture_array_views,
+                albedo_texture_paths = self.albedo_texture_array_paths,
+                normal_texture_paths = self.normal_texture_array_paths,
+                bind_groups = bind_groups_entries,
+                bind_group_layouts = bind_groups_layout_entries)
+
+        # Create the wgpu binding objects
+        self.bind_group_layouts = []
         self.bind_groups = []
 
         for entries, layout_entries in zip(bind_groups_entries, bind_groups_layout_entries):
             bind_group_layout = device.create_bind_group_layout(entries=layout_entries)
-            bind_group_layouts.append(bind_group_layout)
+            self.bind_group_layouts.append(bind_group_layout)
             self.bind_groups.append(
                 device.create_bind_group(layout=bind_group_layout, entries=entries)
             )
 
-        self.pipeline_layout = device.create_pipeline_layout(bind_group_layouts=bind_group_layouts)
+        self.pipeline_layout = device.create_pipeline_layout(bind_group_layouts=self.bind_group_layouts)
 
     ##
     def init_compute_pipeline(
@@ -965,7 +1074,7 @@ class RenderJob(object):
                 
                 attachment_format = self.attachment_formats[attachment_name]
 
-                if attachment_format == 'rgba32float':
+                if attachment_format == 'rgba32float' or attachment_format == 'r32float':
                     render_target_info.append(
                         {
                             "format": attachment_format,
@@ -1199,3 +1308,194 @@ class RenderJob(object):
             assert(parent_job != None)
             self.depth_texture = parent_job.depth_texture
             self.depth_texture_view = self.depth_texture.create_view()
+
+    ##
+    def create_texture_bindings(
+        self,
+        device,
+        texture_views,
+        texture_paths,
+        max_bindings_per_group):
+
+        bind_groups_entries = [[]]
+        bind_groups_layout_entries = [[]]
+
+        texture_array = []
+        texture_view_array = []
+
+        max_bindings_per_group = 100
+
+        texture_index = 0
+        binding_index = 0
+        curr_bind_group_entry = bind_groups_entries[0]
+        curr_bind_group_layout_entry = bind_groups_layout_entries[0]
+        curr_group_index = 0
+        for texture_view in texture_views:
+            
+            # binding group
+            bind_group_info = {
+                "binding": binding_index % max_bindings_per_group,
+                "resource": texture_view
+            }
+            curr_bind_group_entry.append(bind_group_info)
+
+            # binding layout
+            shader_stage = wgpu.ShaderStage.VERTEX | wgpu.ShaderStage.FRAGMENT | wgpu.ShaderStage.COMPUTE
+            bind_group_layout_info = {
+                "binding": binding_index % max_bindings_per_group,
+                "visibility": shader_stage,
+                "texture": {
+                    "sample_type": wgpu.TextureSampleType.float,
+                    "view_dimension": wgpu.TextureViewDimension.d2,
+                }
+            }
+            curr_bind_group_layout_entry.append(bind_group_layout_info)
+
+            texture_index += 1
+            binding_index += 1
+
+            curr_group_index = int(binding_index / max_bindings_per_group)
+            if curr_group_index >= len(bind_groups_entries):
+                bind_groups_entries.append([])
+                bind_groups_layout_entries.append([])
+                curr_bind_group_entry = bind_groups_entries[curr_group_index]
+                curr_bind_group_layout_entry = bind_groups_layout_entries[curr_group_index]
+
+        return bind_groups_entries, bind_groups_layout_entries, texture_array, texture_view_array
+
+    ##
+    def add_textures_to_pass(
+        self,
+        device,
+        albedo_texture_array_views,
+        normal_texture_array_views,
+        albedo_texture_paths,
+        normal_texture_paths,
+        bind_groups,
+        bind_group_layouts):
+        
+        '''
+        bind_groups_entries = [[]]
+        bind_groups_layout_entries = [[]]
+
+        max_bindings_per_group = 100
+
+        start_binding_index = 0
+        texture_index = 0
+        binding_index = 0
+        curr_bind_group_entry = bind_groups_entries[0]
+        curr_bind_group_layout_entry = bind_groups_layout_entries[0]
+        curr_group_index = 0
+        for texture_path in albedo_texture_paths:
+            image = Image.open(texture_path, mode = 'r')
+            
+            # scale down the image
+            if image.width >= 256 or image.width >= 256:
+                scale_width = 256.0 / float(image.width)
+                scale_height = 256.0 / float(image.height)
+                scaled_image = image.resize((int(image.width * scale_width), int(image.height * scale_height)))
+                flipped_image = scaled_image.transpose(method = Image.Transpose.FLIP_TOP_BOTTOM)
+                image = flipped_image
+                
+            # create texture
+            image_byte_array = image.tobytes()
+            texture_width = image.width
+            texture_height = image.height
+            texture_size = texture_width, texture_height, 1
+            texture_format = wgpu.TextureFormat.rgba8unorm
+            texture = device.create_texture(
+                size=texture_size,
+                usage=wgpu.TextureUsage.COPY_DST | wgpu.TextureUsage.TEXTURE_BINDING,
+                dimension=wgpu.TextureDimension.d2,
+                format=texture_format,
+                mip_level_count=1,
+                sample_count=1,
+                label = texture_path
+            )
+            self.textures.append(texture)
+
+            # upload texture data
+            device.queue.write_texture(
+                {
+                    'texture': self.textures[len(self.textures) - 1],
+                    'mip_level': 0,
+                    'origin': (0, 0, 0),
+                },
+                image_byte_array,
+                {
+                    'offset': 0,
+                    'bytes_per_row': texture_width * 4
+                },
+                texture_size
+            )
+
+            self.texture_views.append(self.textures[len(self.textures) - 1].create_view())
+
+            # binding group
+            bind_group_info = {
+                "binding": binding_index % max_bindings_per_group,
+                "resource": self.texture_views[texture_index]
+            }
+            curr_bind_group_entry.append(bind_group_info)
+
+            # binding layout
+            shader_stage = wgpu.ShaderStage.VERTEX | wgpu.ShaderStage.FRAGMENT | wgpu.ShaderStage.COMPUTE
+            bind_group_layout_info = {
+                "binding": binding_index % max_bindings_per_group,
+                "visibility": shader_stage,
+                "texture": {
+                    "sample_type": wgpu.TextureSampleType.float,
+                    "view_dimension": wgpu.TextureViewDimension.d2,
+                }
+            }
+            curr_bind_group_layout_entry.append(bind_group_layout_info)
+
+            texture_index += 1
+            binding_index += 1
+
+            curr_group_index = int(binding_index / max_bindings_per_group)
+            if curr_group_index >= len(bind_groups_entries):
+                bind_groups_entries.append([])
+                bind_groups_layout_entries.append([])
+                curr_bind_group_entry = bind_groups_entries[curr_group_index]
+                curr_bind_group_layout_entry = bind_groups_layout_entries[curr_group_index]
+        '''
+
+        # albedo texture bindings
+        max_bindings_per_group = 100
+        albedo_bind_groups_entries, albedo_bind_groups_layout_entries, albedo_texture_array, albedo_texture_view_array = self.create_texture_bindings(
+            device = device,
+            texture_views = albedo_texture_array_views,
+            texture_paths = albedo_texture_paths,
+            max_bindings_per_group = max_bindings_per_group)
+        
+        # normal texture bindings
+        normal_bind_groups_entries, normal_bind_groups_layout_entries, normal_texture_array, normal_texture_view_array = self.create_texture_bindings(
+            device = device,
+            texture_views = normal_texture_array_views,
+            texture_paths = normal_texture_paths,
+            max_bindings_per_group = max_bindings_per_group)
+
+        for bind_group, bind_group_layout in zip(albedo_bind_groups_entries, albedo_bind_groups_layout_entries):
+            bind_groups.append(bind_group)
+            bind_group_layouts.append(bind_group_layout)
+
+            print('\tadd textures to group {}, binding start: {} to binding: {}'.format(
+                len(bind_groups) - 1,
+                bind_group[0]['binding'],
+                bind_group[len(bind_group) - 1]['binding']
+            ))
+
+        for bind_group, bind_group_layout in zip(normal_bind_groups_entries, normal_bind_groups_layout_entries):
+            bind_groups.append(bind_group)
+            bind_group_layouts.append(bind_group_layout)
+
+            print('\tadd textures to group {}, binding start: {} to binding: {}'.format(
+                len(bind_groups) - 1,
+                bind_group[0]['binding'],
+                bind_group[len(bind_group) - 1]['binding']
+            ))
+
+        
+
+        
